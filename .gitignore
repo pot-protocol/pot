@@ -1,0 +1,43 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Hardhat
+artifacts/
+cache/
+typechain/
+typechain-types/
+
+# Foundry
+out/
+cache_forge/
+broadcast/
+
+# Environment & secrets
+.env
+.env.local
+.env.*.local
+*.key
+*.pem
+
+# Coverage
+coverage/
+coverage.json
+lcov.info
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Build output (site is static — keep index.html/style.css, ignore any bundler output)
+site/dist/
+site/.cache/

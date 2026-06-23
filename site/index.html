@@ -1,0 +1,377 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Pot — Money circles that work</title>
+  <meta name="description" content="Pot is a savings circle for the modern world. A small group of people contribute the same amount each week, and each one takes a turn with the whole pot. No interest. No bank. The community is the underwriter." />
+
+  <!-- Open Graph / social -->
+  <meta property="og:title" content="Pot — Money circles that work" />
+  <meta property="og:description" content="Start with $25 a week. End with a down payment. The savings circle your grandparents trusted, built for the modern world." />
+  <meta property="og:type" content="website" />
+  <meta name="theme-color" content="#C2714F" />
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;600;700;800&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+
+  <!-- Inline SVG favicon: a simple warm circle -->
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='none' stroke='%23C2714F' stroke-width='4'/%3E%3Ccircle cx='16' cy='3.5' r='3' fill='%232C1810'/%3E%3C/svg%3E" />
+</head>
+<body>
+
+  <!-- ───────────────────────── NAV ───────────────────────── -->
+  <header class="nav">
+    <a class="nav__brand" href="#top" aria-label="Pot home">
+      <span class="nav__mark" aria-hidden="true"></span>
+      Pot
+    </a>
+    <nav class="nav__links">
+      <a href="#how">How it works</a>
+      <a href="#ladder">The ladder</a>
+      <a href="#record">Your record</a>
+      <a href="#why">Why it matters</a>
+    </nav>
+    <a class="btn btn--small" href="#join">Join the waitlist</a>
+  </header>
+
+  <main id="top">
+
+    <!-- ───────────────────────── HERO ───────────────────────── -->
+    <section class="hero">
+      <div class="hero__inner reveal">
+        <span class="eyebrow">A savings circle for the modern world</span>
+        <h1 class="hero__title">Pot</h1>
+        <p class="hero__tagline">Money circles that work.</p>
+        <p class="hero__lede">
+          For generations, families and neighbors have saved together by pooling a
+          little money each week and taking turns with the whole pot. It built
+          weddings, cars, and businesses long before anyone had a credit score.
+          It only ever broke down for one reason: it couldn't grow past the people
+          you already knew. <strong>Pot fixes that</strong> — so the circle can be
+          as big as your reliability, not just your address book.
+        </p>
+        <div class="hero__actions">
+          <a class="btn btn--primary" href="#join">Join the waitlist</a>
+          <a class="btn btn--ghost" href="#how">See how it works</a>
+        </div>
+        <p class="hero__note">Pilot circles forming now · 10 people · $50/week · 10 weeks</p>
+      </div>
+
+      <div class="hero__visual reveal" aria-hidden="true">
+        <div class="circlegraphic">
+          <div class="circlegraphic__ring"></div>
+          <span class="seat seat--1"></span>
+          <span class="seat seat--2"></span>
+          <span class="seat seat--3"></span>
+          <span class="seat seat--4 seat--active"></span>
+          <span class="seat seat--5"></span>
+          <span class="seat seat--6"></span>
+          <span class="circlegraphic__pot">
+            <span class="circlegraphic__amount">$1,000</span>
+            <span class="circlegraphic__label">this week's pot</span>
+          </span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── HOW IT WORKS ───────────────────────── -->
+    <section id="how" class="section">
+      <div class="section__head reveal">
+        <span class="eyebrow eyebrow--center">How it works</span>
+        <h2>Three simple steps. That's the whole thing.</h2>
+      </div>
+
+      <div class="steps">
+        <article class="step reveal">
+          <div class="step__icon">①</div>
+          <h3>Start a circle</h3>
+          <p>
+            Gather 2 to 10 people. Agree on an amount — say $50 a week — and how
+            long it runs. Invite friends, or join a circle of trusted strangers
+            once you've built a record.
+          </p>
+        </article>
+
+        <article class="step reveal">
+          <div class="step__icon">②</div>
+          <h3>Everyone contributes</h3>
+          <p>
+            Each week, every person puts in the same amount. Same for everyone,
+            every time. No one puts in more, no one puts in less. It's held safely
+            until the week's turn comes around.
+          </p>
+        </article>
+
+        <article class="step reveal">
+          <div class="step__icon">③</div>
+          <h3>Rotate the pot</h3>
+          <p>
+            Each week, one person receives the entire pot. The order is set fairly
+            at the start and can't be changed. The cycle continues until everyone
+            has had their turn — exactly once.
+          </p>
+        </article>
+      </div>
+
+      <p class="section__aside reveal">
+        Ten people. Fifty dollars a week. Every tenth week, someone walks away
+        with five hundred dollars. Then it's the next person's turn.
+      </p>
+    </section>
+
+    <!-- ───────────────────────── THE LADDER ───────────────────────── -->
+    <section id="ladder" class="section section--warm">
+      <div class="section__head reveal">
+        <span class="eyebrow eyebrow--center">The ladder</span>
+        <h2>Start with $25 a week. End with a down payment.</h2>
+        <p class="section__sub">
+          Pot is built to be climbed. Start small with people you trust. As your
+          record grows, so does the size of the circle you can join. Same simple
+          idea, all the way up.
+        </p>
+      </div>
+
+      <div class="ladder">
+        <div class="ladder__row ladder__row--head" aria-hidden="true">
+          <span>Tier</span><span>The circle</span><span>You put in</span><span>You receive</span>
+        </div>
+
+        <div class="ladder__row reveal">
+          <span class="ladder__tier"><span class="dot dot--seed"></span>Seed</span>
+          <span class="ladder__circle">10 people · 10 weeks</span>
+          <span class="ladder__in">$25 / week</span>
+          <span class="ladder__out">$250</span>
+        </div>
+        <div class="ladder__row reveal">
+          <span class="ladder__tier"><span class="dot dot--circle"></span>Circle</span>
+          <span class="ladder__circle">10 people · 10 weeks</span>
+          <span class="ladder__in">$100 / week</span>
+          <span class="ladder__out">$1,000</span>
+        </div>
+        <div class="ladder__row reveal">
+          <span class="ladder__tier"><span class="dot dot--fund"></span>Fund</span>
+          <span class="ladder__circle">10 people · 10 months</span>
+          <span class="ladder__in">$300 / month</span>
+          <span class="ladder__out">$3,000</span>
+        </div>
+        <div class="ladder__row reveal">
+          <span class="ladder__tier"><span class="dot dot--major"></span>Major</span>
+          <span class="ladder__circle">10 people · 12 months</span>
+          <span class="ladder__in">$500 / month</span>
+          <span class="ladder__out">$6,000</span>
+        </div>
+        <div class="ladder__row ladder__row--peak reveal">
+          <span class="ladder__tier"><span class="dot dot--home"></span>Home</span>
+          <span class="ladder__circle">10 people · 12 months</span>
+          <span class="ladder__in">$1,000 / month</span>
+          <span class="ladder__out">$12,000</span>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── YOUR RECORD ───────────────────────── -->
+    <section id="record" class="section">
+      <div class="section__split">
+        <div class="section__col reveal">
+          <span class="eyebrow">Your record</span>
+          <h2>You can't buy trust. You earn it, one circle at a time.</h2>
+          <p>
+            Every time you show up and contribute on time, your record gets
+            stronger. Complete a circle, keep a streak going, and doors open: first
+            you can join circles with friends of friends, then with trusted
+            strangers, then with anyone.
+          </p>
+          <p>
+            Miss a round, and that mark stays. Permanently. There's no fine print
+            and no way around it — and that's exactly what makes the whole thing
+            safe for everyone else in the circle.
+          </p>
+          <p class="callout">
+            It can't be bought, borrowed, or transferred. It's not a number a
+            company assigned you. It's just the simple, honest truth of whether you
+            showed up. That's the only thing Pot is really building.
+          </p>
+        </div>
+
+        <div class="section__col reveal">
+          <div class="recordcard">
+            <div class="recordcard__top">
+              <span class="recordcard__name">Your standing</span>
+              <span class="recordcard__badge">Trusted</span>
+            </div>
+            <div class="recordcard__rows">
+              <div class="recordcard__line">
+                <span>Circles completed</span><strong>11</strong>
+              </div>
+              <div class="recordcard__line">
+                <span>Showed up on time</span><strong>100%</strong>
+              </div>
+              <div class="recordcard__line">
+                <span>Current streak</span><strong>11 in a row</strong>
+              </div>
+              <div class="recordcard__line recordcard__line--muted">
+                <span>Missed rounds</span><strong>0</strong>
+              </div>
+            </div>
+            <div class="recordcard__foot">
+              Unlocked: public circles with anyone, anywhere.
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── WHY IT MATTERS ───────────────────────── -->
+    <section id="why" class="section section--dark">
+      <div class="section__head reveal">
+        <span class="eyebrow eyebrow--center eyebrow--light">Why this matters</span>
+        <h2>Pot doesn't touch your income. It coordinates it.</h2>
+      </div>
+
+      <div class="why">
+        <div class="why__lead reveal">
+          <p>
+            Most financial products built for people who've been shut out of credit
+            are just extraction with nicer branding — a payday loan, a high-interest
+            card, a rent-to-own trap. They make money <em>from</em> you.
+          </p>
+          <p>
+            Pot is the opposite. There's no lender and no borrower. The money is
+            already yours and your circle's; Pot just gathers it into a sum large
+            enough to matter, at a moment you can count on, instead of letting it
+            trickle away ten dollars at a time.
+          </p>
+        </div>
+
+        <blockquote class="why__quote reveal">
+          <p>
+            The philosopher Ivan Illich drew a line between a <em>service</em> and a
+            <em>tool</em>. A service does something to you and leaves you needing it
+            again next month. A tool puts the capability in your hands and then gets
+            out of the way.
+          </p>
+          <p class="why__quote-punch">Pot is a tool. You are the bank.</p>
+        </blockquote>
+
+        <div class="why__grid">
+          <div class="why__card reveal">
+            <h3>It's even, not one-sided</h3>
+            <p>
+              Charity has a giver and a receiver. Pot doesn't. Everyone puts in the
+              same, everyone takes out the same. The person paid first isn't
+              receiving a handout — they're receiving the trust of nine people who
+              chose them. That's a different thing entirely.
+            </p>
+          </div>
+          <div class="why__card reveal">
+            <h3>It catches what slips away</h3>
+            <p>
+              The hardest part of saving isn't earning — it's that ordinary income
+              disperses before it can ever become something. Pot's only job is to
+              hold the line, so a little each week becomes a real sum you can use.
+            </p>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── OPEN SOURCE PROMISE ───────────────────────── -->
+    <section class="section section--promise">
+      <div class="promise reveal">
+        <span class="eyebrow eyebrow--center">An open promise</span>
+        <h2>The rules that hold your money are public. Anyone can read them.</h2>
+        <p>
+          We're asking you to trust a circle with your savings, so we don't get to
+          keep the machinery a secret. The exact rules that decide who gets paid,
+          when, and how much are written in plain, open code that anyone — you, a
+          friend who knows software, a total skeptic — can read and check. That's
+          not a bonus feature. It's the least we owe you for the ask.
+        </p>
+        <a class="btn btn--ghost-dark" href="https://github.com" rel="noopener">Read the open code →</a>
+      </div>
+    </section>
+
+    <!-- ───────────────────────── WAITLIST ───────────────────────── -->
+    <section id="join" class="section section--join">
+      <div class="join reveal">
+        <span class="eyebrow eyebrow--center">Join the waitlist</span>
+        <h2>The first circles are forming now.</h2>
+        <p class="join__terms">10 people · $50 a week · 10 weeks · $500 when it's your turn</p>
+
+        <form class="join__form" id="waitlist-form" action="mailto:laurens.whipple@gmail.com" method="post" enctype="text/plain">
+          <label class="sr-only" for="email">Your email</label>
+          <input
+            type="email"
+            id="email"
+            name="email"
+            placeholder="you@email.com"
+            autocomplete="email"
+            required
+          />
+          <button type="submit" class="btn btn--primary">Save my seat</button>
+        </form>
+        <p class="join__msg" id="waitlist-msg" role="status" hidden>
+          You're on the list. We'll reach out when a circle near you is forming.
+        </p>
+        <p class="join__fineprint">
+          No spam, no selling your data. Just an email when there's a seat for you.
+        </p>
+      </div>
+    </section>
+
+  </main>
+
+  <!-- ───────────────────────── FOOTER ───────────────────────── -->
+  <footer class="footer">
+    <div class="footer__inner">
+      <div class="footer__brand">
+        <span class="nav__mark" aria-hidden="true"></span>
+        <span>Pot</span>
+      </div>
+      <p class="footer__line">Pot is what credit was supposed to be. No interest. No bank. The community is the underwriter.</p>
+      <p class="footer__legal">© 2026 Pot · Pilot program · <a href="https://github.com" rel="noopener">Open source</a></p>
+    </div>
+  </footer>
+
+  <script>
+    // Gentle scroll-reveal — content is visible by default, this just adds polish
+    // and degrades gracefully if JS is off (no .reveal-hidden = always shown).
+    (function () {
+      var els = document.querySelectorAll('.reveal');
+      if (!('IntersectionObserver' in window) || !els.length) {
+        els.forEach(function (el) { el.classList.add('is-visible'); });
+        return;
+      }
+      els.forEach(function (el) { el.classList.add('reveal--armed'); });
+      var io = new IntersectionObserver(function (entries) {
+        entries.forEach(function (entry) {
+          if (entry.isIntersecting) {
+            entry.target.classList.add('is-visible');
+            io.unobserve(entry.target);
+          }
+        });
+      }, { threshold: 0.12, rootMargin: '0px 0px -40px 0px' });
+      els.forEach(function (el) { io.observe(el); });
+    })();
+
+    // Waitlist: show a friendly confirmation. The mailto action still works as a
+    // real fallback; this just makes the in-page experience feel finished.
+    (function () {
+      var form = document.getElementById('waitlist-form');
+      var msg = document.getElementById('waitlist-msg');
+      if (!form) return;
+      form.addEventListener('submit', function (e) {
+        var email = document.getElementById('email');
+        if (email && email.checkValidity()) {
+          e.preventDefault();
+          form.hidden = true;
+          if (msg) msg.hidden = false;
+        }
+      });
+    })();
+  </script>
+</body>
+</html>
