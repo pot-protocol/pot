@@ -29,7 +29,7 @@ contract PotPool {
     uint16 public immutable minScore;            // Pot Score gate for public pools
     uint256 public immutable formingDeadline;    // pool must fill (or be started) before this; else cancellable
 
-    uint16 public constant PROTOCOL_FEE_BPS = 100; // 1%
+    uint16 public constant PROTOCOL_FEE_BPS = 0; // 0% — protocol takes nothing; you put in $X, you get back $X
     uint48 public constant GRACE_PERIOD = 48 hours;
     uint48 public constant FORMING_WINDOW = 7 days; // lobby lifetime before a stuck pool can be cancelled
 

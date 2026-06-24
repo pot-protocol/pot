@@ -131,7 +131,9 @@ To deploy to Base Sepolia (testnet), set `DEPLOYER_PRIVATE_KEY` and `PROTOCOL_TR
 
 ## Revenue
 
-A **1% protocol fee** is taken from each payout, at the contract level, the moment a pot is released. At 1,000 concurrent circles, that's roughly **$50k / month** — earned by maintaining the rails, not by lending against anyone's income.
+The protocol takes **nothing**. You put in $X, you get back $X. Every dollar that goes into a circle comes back out to a member — no skimming, no extraction.
+
+Monetization is a future question. The priority right now is earning trust by being exactly what we say we are.
 
 ---
 
