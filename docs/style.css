@@ -661,6 +661,25 @@ a { color: inherit; }
   line-height: 1.55;
 }
 
+/* ---------- Explainer (embedded animation) ---------- */
+.explainer-wrap {
+  width: 100%;
+  max-width: 900px;
+  margin: 0 auto;
+  aspect-ratio: 16 / 9;
+  border-radius: var(--radius);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  box-shadow: var(--shadow);
+  background: var(--cream);
+}
+.explainer-wrap iframe {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border: 0;
+}
+
 /* ---------- FAQ ---------- */
 .faq {
   max-width: 760px;
