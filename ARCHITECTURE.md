@@ -180,6 +180,17 @@ ejection.
 > slot. The shuffle algorithm is unchanged; only its seed moved from a gameable
 > on-chain value to a verifiable off-chain one. See *Known gaps* row 2.
 
+**Staking (public pools only).** A public-pool member locks a stake equal to
+`contributionAmount` — joiners stake atomically in `join`, the creator (who
+auto-joined at construction, before the pool address existed to approve) stakes
+via `stake()`. A public pool can't start until the roster is full **and** every
+member has staked. The stake is the Sybil/default deterrent (#10): it is held in
+the contract from `Forming` onward, **slashed** if the member defaults and is
+ejected, and the slashed total is split equally among the survivors at
+completion via `claimRefund`. Critically, `_payout` pays the *exact* round pot
+(`members.length × contributionAmount`), not `balanceOf`, so held stakes are
+never swept into a payout. Private pools require no stake (trust is social).
+
 **Contributing.** `contribute` requires the member to have pre-approved the pool
 for `contributionAmount` USDC. It records on-time vs. grace-period status
 (stamped into the Pot Score), pulls the USDC, then calls `_trySettle`. The last
@@ -285,16 +296,18 @@ are tracked as `testTODO_*` stubs in
 | 2 | **Weak rotation randomness.** The original `_start` seeded the shuffle on `block.timestamp` + `block.prevrandao`, which the final joiner could simulate in-block and grind for an early slot. | **Resolved (this pass)** — replaced with Chainlink VRF v2.5: two-phase start (`_requestRotation` → `Pending` → `fulfillRandomWords` locks the order), permissionless `retryRotation` escape hatch, stale-callback no-op guard, factory-owned subscription. No funds are held while `Pending`. Verify coordinator/key-hash addresses against docs.chain.link before mainnet, and confirm the subscription is funded. | High (fairness) |
 | 3 | **Full-wipeout payout.** If every remaining member misses the same round, `_ejectMissers` empties `members` and the original `_payout` would index out of bounds / pay a ghost. | **Mitigated** — `_payout` now cancels the pool (`Cancelled`) when no live recipient exists; the eject loop's index-0 underflow is guarded. Refund accounting for the cancelled funds is still TODO (#5). | High |
 | 4 | **Reentrancy on `_payout`.** CEI ordering is in place and USDC is a known non-reentrant token, but this has not been formally audited, and a future non-USDC pool would reopen the surface. | **Open** — needs audit + a reentrant-token test. Consider adding OZ `ReentrancyGuard` defensively. | Medium |
-| 5 | **Disband / refund accounting.** Spec calls for returning *net* contributions (total in − total received) on early cancellation. Not implemented; cancelled pools currently strand their balance. | **Open** — needs design + reconciliation math + tests. | High |
-| 6 | **Stake deposit.** Spec calls for each member to lock one round's contribution at join, released at close, forfeited to remaining members if ejected post-payout. | **Open** — not yet on-chain. | Medium |
+| 5 | **Disband / refund accounting (residual edges).** Most paths now reconcile (stakes refund on completion/cancellation, slashed stakes split among survivors), but two edges still strand funds: a **full wipeout** (every member misses the same round → all ejected, no survivors to pay) and a **last-slot default** (the final rotation recipient is ejected → `_payout` cancels). In both, ejected members are not `isMember` so they can't `claimRefund`, and their net contributions/stakes strand. | **Open (narrowed)** — needs net-contribution reconciliation math + tests for these two cases. | Medium |
+| 6 | **Stake deposit.** Each member locks one round's contribution at join, released at close, forfeited if ejected post-default. | **Implemented for PUBLIC pools (this pass)** — `stake()`/atomic-on-`join`, held from `Forming`, slashed in `_ejectMissers` and split among survivors via `claimRefund` at completion. `_payout` pays the exact round pot (`members.length × contributionAmount`) so held stakes are never swept. Private pools require no stake (social trust). Edge reconciliation lands with #5. | High (compensation) |
 | 7 | **On-chain pool discovery.** Beyond the factory's index there's no rich query layer; the frontend must index events (`PoolCreated`, `ContributionReceived`, `PotPaid`, `MemberEjected`). | **By design** — build an off-chain indexer. | Low |
 | 8 | **Hardcoded USDC address.** `PotPool` hardcodes Base mainnet USDC, which makes unit testing awkward (the test suite uses `vm.etch` to work around it). | **Open** — recommend taking the token address as a constructor arg so tests and other chains are first-class. | Low |
 | 9 | **Lobby / expiry mechanics.** A pool that never filled used to sit in `Forming` forever, stranding whoever joined early with no recourse. | **Added (this pass)** — `formingDeadline` (7-day `FORMING_WINDOW`) + permissionless `cancelIfExpired`, creator-only `startEarly` (2+ members, reuses `_requestRotation`), and a `claimRefund` stub guarded by `refundClaimed`. The refund **transfer** is still a stub (no stakes held on-chain yet) and lands with #5/#6. | — |
-| 10 | **Sybil / reputation farming.** A ring of colluding wallets can run fake circles among themselves — everyone "pays" on time — to cheaply farm high Pot Scores, then use that inflated reputation to enter or abuse public stranger pools. This attacks the reputation layer that is the protocol's entire trust thesis. | **Open** — needs anti-Sybil design: stake-at-risk per pool, counterparty-diversity weighting in `getScore`, per-cluster cost-to-fake, or a proof-of-personhood gate for public pools. Surfaced in user feedback 2026-06-24. | High |
+| 10 | **Sybil / reputation farming.** A ring of colluding wallets can farm Pot Scores via fake circles, then use that reputation to enter/abuse public stranger pools. Attacks the reputation layer that is the trust thesis. | **Partially addressed (this pass) — "defend the harm, not the farming."** Detecting fake circles is unwinnable (a real friend group ≡ a Sybil ring on-chain), so instead: **public** pools now require **stake-at-risk slashed on default** (gap #6) — farmed reputation is harmless until *used to default on a real counterparty*, and that now costs the attacker their stake (paid to the victims). **Friend/invite** pools are Sybil-immune by construction (no stake needed). Remaining: **proof-of-personhood** as an *opt-in* per-public-pool gate (the only robust defense for truly-open pools) is deferred; counterparty-diversity weighting was considered and **rejected** (false-positives real families). See `DESIGN-fairness-and-sybil.md`. | High |
 | 11 | **Rotation positional value (fairness beyond the draw).** Even with a perfectly fair VRF draw, the time value of money makes early slots genuinely worth more than late ones, so being "last" is a real economic loss. VRF fixes draw *integrity*, not positional *value*. | **Partially addressed (this pass)** — shipped per-pool ordering choice (`PotPool.fixedOrdering`): **private** pools may use a creator-set or join order so the circle arranges by *need* (and skip VRF); **public** pools are forced to VRF. This reframes the problem (return fairness to the humans who can express need) rather than engineering a constrained shuffle, which was rejected as a fig leaf — slot N−1 ≈ slot N. Lifetime position-balancing / reputation-bidding deferred to v2. See `DESIGN-fairness-and-sybil.md`. | Medium (product) |
 
-**Do not deploy to mainnet until #4, #5, #6, and #10 are closed and the system
-has a third-party audit.** (#2 weak randomness is now resolved via Chainlink VRF.)
+**Do not deploy to mainnet until #4 and #5 are closed, #10's proof-of-personhood
+posture is decided, and the system has a third-party audit.** (#2 randomness
+resolved via Chainlink VRF; #6 stake deposit implemented; #10 harm-defense
+(stake-slashing) implemented for public pools.)
 
 Design proposals for the two newest gaps — **#10 Sybil/reputation-farming** and
 **#11 positional fairness** — with options, recommendations, and the decisions

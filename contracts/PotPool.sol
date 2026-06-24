@@ -65,7 +65,17 @@ contract PotPool is VRFConsumerBaseV2Plus {
     address[] private _fixedRotation; // creator-set order for a FIXED pool (optional)
     mapping(address => bool) public isMember;
     mapping(address => bool) public hasInvite;
-    mapping(address => bool) public refundClaimed; // guards against double refunds after a cancellation
+    mapping(address => bool) public refundClaimed; // guards against double stake claims after the pool ends
+
+    // --- Stake-at-risk (PUBLIC pools only; the Sybil/default deterrent, v1.1) ---
+    // Each public-pool member locks a stake = contributionAmount. It is returned
+    // at clean completion, forfeited (slashed) if the member defaults and is
+    // ejected, and the slashed total is split among the survivors at completion.
+    // Private pools require no stake — their trust is social. See
+    // DESIGN-fairness-and-sybil.md (#10).
+    mapping(address => bool) public staked; // member has locked their stake
+    uint256 public stakedCount;             // # of current members who have staked
+    uint256 public totalSlashed;            // forfeited stakes, split among survivors at completion
 
     uint8 public currentRound;
     uint256 public roundDeadline;
@@ -83,6 +93,8 @@ contract PotPool is VRFConsumerBaseV2Plus {
     event PoolStartedEarly(uint8 memberCount);
     event PoolCancelled();
     event RefundClaimed(address indexed member);
+    event Staked(address indexed member, uint256 amount);
+    event StakeSlashed(address indexed member, uint256 amount);
 
     constructor(
         address _creator,
@@ -135,11 +147,11 @@ contract PotPool is VRFConsumerBaseV2Plus {
         hasInvite[addr] = true;
     }
 
-    /// @notice Join a forming pool. Public pools gate on Pot Score; private
-    ///         pools gate on an invite from the creator. A RANDOM-order pool
-    ///         auto-starts once the roster is full; a FIXED-order pool waits for
-    ///         the creator to start it (via startEarly), which is the window in
-    ///         which the creator can call setRotationOrder.
+    /// @notice Join a forming pool. Public pools gate on Pot Score AND require the
+    ///         joiner to lock their stake in the same transaction (no roster slot
+    ///         without skin in the game); private pools gate on an invite. A
+    ///         RANDOM pool auto-starts once the roster is full and (if public)
+    ///         everyone has staked; a FIXED pool waits for the creator to start it.
     function join() external {
         require(state == PoolState.Forming, "Not forming");
         require(members.length < maxMembers, "Pool full");
@@ -148,10 +160,44 @@ contract PotPool is VRFConsumerBaseV2Plus {
         } else {
             require(hasInvite[msg.sender] || msg.sender == creator, "No invite");
         }
-        _join(msg.sender);
-        if (members.length == maxMembers && !fixedOrdering) {
+        _join(msg.sender);                       // roster first (effects before the stake pull)
+        if (isPublic) _pullStake(msg.sender);    // public: lock stake atomically with the join
+        if (members.length == maxMembers && !fixedOrdering && (!isPublic || _allStaked())) {
             _beginStart();
         }
+    }
+
+    /// @notice Public-pool members lock their stake here. Joiners stake atomically
+    ///         in `join`; the creator (who auto-joined at construction and can't
+    ///         pre-approve a not-yet-deployed pool) calls this once. Starting the
+    ///         creator's stake is what lets a full public pool begin.
+    function stake() external {
+        require(state == PoolState.Forming, "Not forming");
+        require(isPublic, "Stake is for public pools only");
+        require(isMember[msg.sender], "Not a member");
+        require(!staked[msg.sender], "Already staked");
+        _pullStake(msg.sender);
+        // Public pools are always RANDOM; if the roster is full and now fully
+        // staked, this is the trigger that begins the pool.
+        if (members.length == maxMembers && _allStaked()) {
+            _beginStart();
+        }
+    }
+
+    /// @dev Pull one member's stake (= contributionAmount). Effects (staked flag,
+    ///      count) precede the token interaction.
+    function _pullStake(address m) internal {
+        require(!staked[m], "Already staked");
+        staked[m] = true;
+        stakedCount++;
+        require(usdc.transferFrom(m, address(this), contributionAmount), "Stake transfer failed");
+        emit Staked(m, contributionAmount);
+    }
+
+    /// @dev True iff every current member has staked. Only meaningful for public
+    ///      pools (private pools never stake, so this stays false and is bypassed).
+    function _allStaked() internal view returns (bool) {
+        return stakedCount == members.length;
     }
 
     function _join(address addr) internal {
@@ -312,41 +358,53 @@ contract PotPool is VRFConsumerBaseV2Plus {
         require(msg.sender == creator, "Only creator");
         require(state == PoolState.Forming, "Not forming");
         require(members.length >= 2, "Need 2+ members");
+        require(!isPublic || _allStaked(), "All members must stake first");
         emit PoolStartedEarly(uint8(members.length));
         _beginStart();
     }
 
-    /// @notice Permissionless escape hatch for a pool that never filled. Once the
-    ///         forming window has elapsed with the roster still incomplete,
-    ///         anyone may cancel it so members aren't stranded in `Forming`
-    ///         forever. Flips state to `Cancelled`; members then call
-    ///         `claimRefund` to recover any stake.
-    /// @dev    CEI: the only state change (`state`) is written before the event;
-    ///         there are no external calls here, so there is no reentrancy
-    ///         surface to guard.
+    /// @notice Permissionless escape hatch for a pool that never started — either
+    ///         it never filled (`Forming`) or its VRF request never fulfilled and
+    ///         left it stuck in `Pending`. Once the forming window has elapsed,
+    ///         anyone may cancel so members (and their public-pool stakes, which
+    ///         are held from `Forming` onward) aren't stranded. Flips to
+    ///         `Cancelled`; members then call `claimRefund` to recover their stake
+    ///         (no slashing — nobody defaulted). A late VRF callback after this is
+    ///         a no-op (fulfillRandomWords ignores any non-`Pending` state).
+    /// @dev    `Pending` pools can retry VRF via `retryRotation` (every
+    ///         RANDOMNESS_RETRY_WINDOW) up until this deadline, so cancellation is
+    ///         the last resort after a genuinely dead subscription. CEI: the only
+    ///         state change precedes the event; no external calls here.
     function cancelIfExpired() external {
-        require(state == PoolState.Forming, "Not forming");
+        require(state == PoolState.Forming || state == PoolState.Pending, "Not cancellable");
         require(block.timestamp >= formingDeadline, "Not expired");
         state = PoolState.Cancelled;
         emit PoolCancelled();
     }
 
-    /// @notice After a pool is `Cancelled`, a member reclaims their stake deposit.
-    /// @dev    Stake deposits are a v1 feature (see ARCHITECTURE.md "Known gaps":
-    ///         stake deposit / disband refund accounting) and are not yet held
-    ///         on-chain, so there is nothing to transfer today — this is a stub
-    ///         that records the claim and emits `RefundClaimed`. The
-    ///         `refundClaimed` guard and the CEI ordering are written now so the
-    ///         transfer can be dropped in later without re-architecting: the
-    ///         effect (marking the claim) already precedes the (future) interaction.
+    /// @notice After a public pool ends, a surviving member reclaims their stake.
+    ///         On clean **completion** they also receive an equal share of any
+    ///         slashed (defaulter) stakes. On **cancellation** (a pool that never
+    ///         started) they get their stake back with no slashing. Private pools
+    ///         hold no stake, so there is nothing to claim.
+    /// @dev    Pull-pattern + CEI: the `refundClaimed` guard is set before the
+    ///         single token transfer. Ejected defaulters are not `isMember`, so
+    ///         they cannot claim — their forfeited stake is the slashed pool.
+    ///         (Reconciling a *full-wipeout* cancellation — every member ejected
+    ///         the same round — is the separate disband/refund gap; those stakes
+    ///         currently strand. See ARCHITECTURE.md "Known gaps".)
     function claimRefund() external {
-        require(state == PoolState.Cancelled, "Not cancelled");
-        require(isMember[msg.sender], "Not a member");
-        require(!refundClaimed[msg.sender], "Already refunded");
+        require(state == PoolState.Complete || state == PoolState.Cancelled, "Pool not ended");
+        require(isMember[msg.sender], "Not a surviving member");
+        require(staked[msg.sender], "No stake to claim");
+        require(!refundClaimed[msg.sender], "Already claimed");
 
-        // Checks-Effects-Interactions: set the guard before any (future) transfer.
-        refundClaimed[msg.sender] = true;
-        // Stake-deposit refund transfer goes here once stakes are held on-chain (v1).
+        refundClaimed[msg.sender] = true; // effect before interaction
+        uint256 amount = contributionAmount; // your stake back
+        if (state == PoolState.Complete && members.length > 0) {
+            amount += totalSlashed / members.length; // equal share of slashed stakes
+        }
+        require(usdc.transfer(msg.sender, amount), "Stake refund failed");
         emit RefundClaimed(msg.sender);
     }
 
@@ -404,6 +462,13 @@ contract PotPool is VRFConsumerBaseV2Plus {
             address m = members[i];
             if (!contributed[currentRound][m]) {
                 isMember[m] = false;
+                // Forfeit a defaulter's stake: it stays in the contract and is
+                // split among the survivors at completion (the harm — defaulting
+                // on a real counterparty — is what costs you, not the farming).
+                if (staked[m]) {
+                    totalSlashed += contributionAmount;
+                    emit StakeSlashed(m, contributionAmount);
+                }
                 scoreContract.onMiss(m);
                 emit MemberEjected(m, currentRound);
                 members[i] = members[members.length - 1];
@@ -432,7 +497,10 @@ contract PotPool is VRFConsumerBaseV2Plus {
             return;
         }
 
-        uint256 pot = usdc.balanceOf(address(this));
+        // The round pot is EXACTLY this round's contributions: every surviving
+        // member contributed (missers were just ejected). Computing it directly
+        // (rather than balanceOf) is what keeps held stakes out of the payout.
+        uint256 pot = members.length * contributionAmount;
         uint256 fee = (pot * PROTOCOL_FEE_BPS) / 10_000;
         uint256 payout = pot - fee;
 

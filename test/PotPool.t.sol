@@ -426,6 +426,139 @@ contract PotPoolTest is Test {
     }
 
     // ------------------------------------------------------------------
+    // Stake-at-risk (PUBLIC pools) — v1.1 (#10)
+    // ------------------------------------------------------------------
+
+    /// A public pool can't start until the roster is full AND every member has
+    /// staked — including the creator (who staked separately, post-construction).
+    function test_PublicPool_StartGatesOnAllStaked() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, true, 0, false));
+
+        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Forming), "full but creator unstaked -> not started");
+        assertEq(pool.stakedCount(), 1);
+        assertTrue(pool.staked(bob));
+
+        vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending), "all staked + full -> VRF requested");
+        assertEq(usdc.balanceOf(address(pool)), CONTRIB * 2, "both stakes held");
+
+        _fulfill(pool);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
+    }
+
+    /// Clean completion: every member gets exactly their stake back, no slashing.
+    function test_PublicPool_StakeRefundedOnCleanCompletion() public {
+        address[] memory who = new address[](2);
+        who[0] = alice; who[1] = bob;
+        PotPool pool = _formPublicStaked(who);
+        _driveToComplete(pool);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Complete));
+        assertEq(pool.totalSlashed(), 0, "no defaults");
+
+        uint256 aBefore = usdc.balanceOf(alice);
+        vm.prank(alice); pool.claimRefund();
+        assertEq(usdc.balanceOf(alice) - aBefore, CONTRIB, "stake returned in full");
+        vm.prank(bob); pool.claimRefund();
+        assertEq(usdc.balanceOf(address(pool)), 0, "all stakes returned, pool empty");
+    }
+
+    /// A defaulter's stake is slashed and split equally among the survivors at
+    /// completion; the defaulter cannot reclaim anything.
+    function test_PublicPool_StakeSlashedAndSplitAmongSurvivors() public {
+        address[] memory who = new address[](3);
+        who[0] = alice; who[1] = bob; who[2] = carol;
+        PotPool pool = _formPublicStaked(who);
+
+        // Pick the defaulter as the first-slot recipient: ejecting them before
+        // their slot is paid lets the pool still complete (ejecting the *last*
+        // slot's member would cancel — the separate disband/refund gap #5).
+        address[] memory order = pool.getRotationOrder();
+        address defaulter = order[0];
+        (address s1, address s2) = _otherTwo(who, defaulter);
+
+        // round 0: both survivors pay, the defaulter doesn't
+        _contribute(pool, s1);
+        _contribute(pool, s2);
+        vm.warp(block.timestamp + 7 days + 48 hours + 1);
+        pool.settle(); // ejects defaulter, slashes their stake
+        assertFalse(pool.isMember(defaulter), "defaulter ejected");
+        assertEq(pool.totalSlashed(), CONTRIB, "defaulter's stake slashed");
+
+        _driveToComplete(pool);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Complete));
+
+        // each survivor: own stake + half of the slashed stake
+        uint256 b1 = usdc.balanceOf(s1);
+        vm.prank(s1); pool.claimRefund();
+        assertEq(usdc.balanceOf(s1) - b1, CONTRIB + CONTRIB / 2, "stake + half of slash");
+        vm.prank(s2); pool.claimRefund();
+
+        vm.prank(defaulter);
+        vm.expectRevert(bytes("Not a surviving member"));
+        pool.claimRefund();
+
+        assertEq(usdc.balanceOf(address(pool)), 0, "all three stakes resolved");
+    }
+
+    /// Return the two members of `who` (length 3) that are not `excluded`.
+    function _otherTwo(address[] memory who, address excluded) internal pure returns (address a, address b) {
+        address[] memory rest = new address[](2);
+        uint256 k = 0;
+        for (uint256 i = 0; i < who.length; i++) {
+            if (who[i] != excluded) { rest[k] = who[i]; k++; }
+        }
+        return (rest[0], rest[1]);
+    }
+
+    /// A public pool that never fills can be cancelled; stakers reclaim in full.
+    function test_PublicPool_StakeRefundedOnFormingCancel() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 3, true, 0, false)); // 3 seats, won't fill
+        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
+        vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Forming), "never filled");
+
+        vm.warp(block.timestamp + 7 days + 1);
+        pool.cancelIfExpired();
+
+        uint256 aBefore = usdc.balanceOf(alice);
+        vm.prank(alice); pool.claimRefund();
+        assertEq(usdc.balanceOf(alice) - aBefore, CONTRIB, "stake back, no slash");
+        vm.prank(bob); pool.claimRefund();
+        assertEq(usdc.balanceOf(address(pool)), 0);
+    }
+
+    /// A public pool stuck in Pending (VRF never fulfilled) can be cancelled after
+    /// the forming window, recovering the stakes held since Forming.
+    function test_PublicPool_StuckInPending_CancelRefundsStakes() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, true, 0, false));
+        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
+        vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending), "VRF requested, not fulfilled");
+        assertEq(usdc.balanceOf(address(pool)), CONTRIB * 2, "stakes held during Pending");
+
+        vm.warp(block.timestamp + 7 days + 1);
+        pool.cancelIfExpired(); // escape from a stuck Pending
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled));
+
+        uint256 aBefore = usdc.balanceOf(alice);
+        vm.prank(alice); pool.claimRefund();
+        assertEq(usdc.balanceOf(alice) - aBefore, CONTRIB, "stake recovered");
+        vm.prank(bob); pool.claimRefund();
+        assertEq(usdc.balanceOf(address(pool)), 0, "all stakes recovered");
+    }
+
+    /// Private pools never stake (claimRefund has nothing to give).
+    function test_PrivatePool_NoStake() public {
+        PotPool pool = _form2(alice, bob);
+        assertEq(pool.stakedCount(), 0, "private pools never stake");
+        assertFalse(pool.staked(alice));
+    }
+
+    // ------------------------------------------------------------------
     // TODO: audit-target edge cases (stubs — implement before mainnet)
     // ------------------------------------------------------------------
 
@@ -533,5 +666,38 @@ contract PotPoolTest is Test {
         usdc.approve(address(pool), CONTRIB);
         pool.contribute();
         vm.stopPrank();
+    }
+
+    /// Form a PUBLIC pool with every member staked, fulfill VRF, and return it
+    /// Active. who[0] is the creator (stakes last, which triggers the start).
+    function _formPublicStaked(address[] memory who) internal returns (PotPool pool) {
+        vm.prank(who[0]);
+        pool = PotPool(factory.createPool(CONTRIB, 7, uint8(who.length), true, 0, false));
+        for (uint256 i = 1; i < who.length; i++) {
+            vm.startPrank(who[i]);
+            usdc.approve(address(pool), CONTRIB); // stake approval
+            pool.join();                          // pulls the stake atomically
+            vm.stopPrank();
+        }
+        vm.startPrank(who[0]);
+        usdc.approve(address(pool), CONTRIB);
+        pool.stake();                             // creator stakes -> begins the pool (Pending)
+        vm.stopPrank();
+        _fulfill(pool);                           // VRF -> Active
+    }
+
+    /// Contribute for every current member each round until the pool completes
+    /// (no defaults — everyone pays on time, so nobody is ejected).
+    function _driveToComplete(PotPool pool) internal {
+        for (uint256 g = 0; g < 100; g++) {
+            if (uint8(pool.state()) != uint8(PotPool.PoolState.Active)) break;
+            uint8 round = pool.currentRound();
+            uint256 n = pool.memberCount();
+            for (uint256 i = 0; i < n; i++) {
+                if (uint8(pool.state()) != uint8(PotPool.PoolState.Active)) break;
+                address m = pool.members(i);
+                if (!pool.contributed(round, m)) _contribute(pool, m);
+            }
+        }
     }
 }

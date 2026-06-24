@@ -50,5 +50,7 @@ This deletes the constrained-shuffle idea entirely; ordering becomes a flag + an
 ---
 
 ## Build status
-- **#11 ordering-mode:** implemented this pass (`PotPool.fixedOrdering`, `setRotationOrder`, public-forces-random invariant, FIXED skips VRF) + tests. Audit-gated like all contract code before mainnet.
-- **#10:** design only. Stake-slashing is a real build that extends the stake-deposit gap (#6); personhood is opt-in/deferred. Neither merges to a fund-holding deploy without a Code4rena pass.
+- **#11 ordering-mode:** implemented (`PotPool.fixedOrdering`, `setRotationOrder`, public-forces-random invariant, FIXED skips VRF) + tests.
+- **#10 stake-slashing:** implemented for public pools (`stake()`/atomic-on-`join`, slash in `_ejectMissers`, split among survivors in `claimRefund`; `_payout` pays the exact round pot so stakes aren't swept; a stuck-`Pending` pool can be cancelled to recover stakes). Folds in the stake-deposit gap (#6). **Proof-of-personhood** (opt-in per public pool) remains deferred — the only robust defense for truly-open pools, accepting it costs some trustlessness.
+- Residual: two fund-stranding edges (full wipeout, last-slot default) are the narrowed disband/refund gap (#5).
+- **All of the above is audit-gated** — nothing merges to a fund-holding deploy without a Code4rena pass.
