@@ -1,0 +1,12 @@
+# Money Circle — moneycircle.finance
+# Allow all crawlers, including social-card fetchers (Twitterbot, facebookexternalhit,
+# Slackbot, Discordbot, etc.). Previously /robots.txt returned the SPA HTML fallback
+# (200 text/html), which left crawl permission ambiguous.
+
+User-agent: *
+Allow: /
+
+User-agent: Twitterbot
+Allow: /
+
+Sitemap: https://moneycircle.finance/sitemap.xml
