@@ -41,3 +41,9 @@ yarn-error.log*
 # Build output (site is static — keep index.html/style.css, ignore any bundler output)
 site/dist/
 site/.cache/
+
+# Waitlist backend (separate service) — never commit its venv, caches, or signup data
+waitlist/venv/
+**/__pycache__/
+*.pyc
+waitlist/signups.csv
