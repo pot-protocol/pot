@@ -40,7 +40,7 @@ Start with $25 a week. End with a down payment. Same mechanism, all the way up.
 
 1. **Create.** Someone sets the terms: 2–10 members, a contribution amount ($25 minimum), and an interval (weekly or monthly).
 2. **Join.** Members join and lock in. Private circles are invite-only; public circles are gated by Pot Score.
-3. **Rotate.** When the circle is full, a payout order is randomly assigned and **locked on-chain** — no one can change it, not even the creator.
+3. **Rotate.** When the circle is full, the payout order is **locked on-chain** — no one can change it, not even the creator. A circle of strangers gets a *verifiably random* order (so no one can rig their position); a circle of friends can simply agree on the order together — e.g. by who needs the money first.
 4. **Contribute.** Each round runs for the full interval — a week or a month. Once everyone has paid in, the contract automatically releases the full pot to that round's recipient.
 5. **Grace & ejection.** After the deadline, a 48-hour grace period covers late payers. Miss it and anyone can settle the round: defaulters are ejected — with a permanent mark on their Pot Score — and the pot is released to whoever's turn it is.
 6. **Close.** The circle ends clean when every member has received the pot exactly once.

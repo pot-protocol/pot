@@ -52,5 +52,17 @@ This deletes the constrained-shuffle idea entirely; ordering becomes a flag + an
 ## Build status
 - **#11 ordering-mode:** implemented (`PotPool.fixedOrdering`, `setRotationOrder`, public-forces-random invariant, FIXED skips VRF) + tests.
 - **#10 stake-slashing:** implemented for public pools (`stake()`/atomic-on-`join`, slash in `_ejectMissers`, split among survivors in `claimRefund`; `_payout` pays the exact round pot so stakes aren't swept; a stuck-`Pending` pool can be cancelled to recover stakes). Folds in the stake-deposit gap (#6). **Proof-of-personhood** (opt-in per public pool) remains deferred — the only robust defense for truly-open pools, accepting it costs some trustlessness.
-- Residual: two fund-stranding edges (full wipeout, last-slot default) are the narrowed disband/refund gap (#5).
-- **All of the above is audit-gated** — nothing merges to a fund-holding deploy without a Code4rena pass.
+- Residual: two fund-stranding edges (full wipeout, last-slot default) are **closed** as of the v1.1 hardening pass (disband reconciliation); lifetime net-position accounting across many partial rounds remains the only #5 residual.
+- **All of the above is audit-gated** — nothing merges to a fund-holding deploy without a Code4rena pass. Threat model + invariants for that audit are in `AUDIT-PREP.md`.
+
+## v2 roadmap (deliberately out of v1.1, not gaps)
+v1.1's Sybil posture is **complete on its own**: friend/invite pools are immune by
+construction, and public pools are stake-gated with slashing-on-default. The following
+are intentional *next-version* choices, gated on real demand — not unfinished work:
+- **Proof-of-personhood**, opt-in per public pool (World ID / BrightID / Gitcoin Passport)
+  — the only robust defense for *truly open* stranger pools, accepting that it costs some
+  trustlessness and adds friction. Build it when open stranger pools are real demand.
+- **Reputation-bidding for slot position** (bid score, not cash) — a richer fairness lever
+  than the v1.1 ordering choice, deferred until the incentive design is worked out.
+- **Lifetime net-position reconciliation** — a full per-member in-minus-received ledger
+  for disbands across many partial rounds (v1.1 reconciles the cancelled round + stakes).

@@ -312,7 +312,9 @@ resolved via Chainlink VRF; #6 stake deposit implemented; #10 harm-defense
 Design proposals for the two newest gaps — **#10 Sybil/reputation-farming** and
 **#11 positional fairness** — with options, recommendations, and the decisions
 that need your call, are in
-[`DESIGN-fairness-and-sybil.md`](DESIGN-fairness-and-sybil.md).
+[`DESIGN-fairness-and-sybil.md`](DESIGN-fairness-and-sybil.md). A turnkey
+scope/threat-model/invariants package for the third-party audit is in
+[`AUDIT-PREP.md`](AUDIT-PREP.md).
 
 ---
 
