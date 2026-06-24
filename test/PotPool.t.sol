@@ -15,21 +15,35 @@ contract MockUSDC is ERC20 {
     function mint(address to, uint256 amount) external { _mint(to, amount); }
 }
 
+/// @dev Malicious token: on a real transfer (once `armed`), it re-enters a target
+///      function. Used to prove PotPool's ReentrancyGuard blocks reentrancy.
+contract ReentrantUSDC is ERC20 {
+    address public reenterTarget;
+    bytes public reenterData;
+    bool public armed;
+    constructor() ERC20("Reentrant USDC", "rUSDC") {}
+    function decimals() public pure override returns (uint8) { return 6; }
+    function mint(address to, uint256 a) external { _mint(to, a); }
+    function arm(address t, bytes calldata d) external { reenterTarget = t; reenterData = d; armed = true; }
+    function _update(address from, address to, uint256 value) internal override {
+        super._update(from, to, value);
+        if (armed && from != address(0) && to != address(0)) { // a real transfer, not mint/burn
+            armed = false; // one-shot
+            (bool ok, bytes memory ret) = reenterTarget.call(reenterData);
+            if (!ok) { assembly { revert(add(ret, 0x20), mload(ret)) } } // bubble the guard's revert
+        }
+    }
+}
+
 /// @title PotPool test suite
 /// @notice Exercises the full lifecycle of a Pot circle. Since the
 ///         block.prevrandao shuffle was replaced with Chainlink VRF, starting a
 ///         pool is a two-phase operation: filling the roster only *requests*
 ///         randomness (state -> Pending); the rotation order is locked when the
 ///         VRF coordinator calls back (state -> Active). Tests drive that
-///         callback with VRFCoordinatorV2_5Mock.
-///
-/// @dev    IMPORTANT TEST-HARNESS NOTE: PotPool hardcodes the Base mainnet USDC
-///         address in its constructor. To test against MockUSDC we `vm.etch` the
-///         mock's runtime bytecode at that address (approach (a) — the suite runs
-///         without modifying the contract; the constructor-arg refactor is still
-///         the recommended production fix, see ARCHITECTURE.md).
+///         callback with VRFCoordinatorV2_5Mock. USDC is a constructor arg, so
+///         the suite passes a MockUSDC directly (no vm.etch).
 contract PotPoolTest is Test {
-    address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
 
     // VRF mock config — values are arbitrary for the mock; the key hash is only
     // a label here, and the subscription is funded far beyond any test's needs.
@@ -51,10 +65,9 @@ contract PotPoolTest is Test {
     uint256 constant CONTRIB = 100e6; // $100
 
     function setUp() public {
-        // Deploy a mock and graft its code onto the hardcoded Base USDC address.
-        MockUSDC mock = new MockUSDC();
-        vm.etch(BASE_USDC, address(mock).code);
-        usdc = MockUSDC(BASE_USDC);
+        // USDC is now a constructor arg, so the mock is just deployed and passed
+        // to the factory — no more vm.etch onto a hardcoded address.
+        usdc = new MockUSDC();
 
         // VRF v2.5 mock: (baseFee, gasPrice, weiPerUnitLink).
         vrf = new VRFCoordinatorV2_5Mock(1e17, 1e9, 4e15);
@@ -63,6 +76,7 @@ contract PotPoolTest is Test {
         factory = new PotFactory(
             address(score),
             treasury,
+            address(usdc),
             address(vrf),
             KEY_HASH,
             CB_GAS_LIMIT,
@@ -558,65 +572,140 @@ contract PotPoolTest is Test {
         assertFalse(pool.staked(alice));
     }
 
+    /// Full wipeout (every member misses the same round): everyone is ejected,
+    /// the pool cancels cleanly, and every staker recovers their stake — nothing
+    /// strands. (Also exercises the _ejectMissers index-0 fix.)
+    function test_FullWipeout_DisbandRefundsAllStakes() public {
+        address[] memory who = new address[](3);
+        who[0] = alice; who[1] = bob; who[2] = carol;
+        PotPool pool = _formPublicStaked(who);
+
+        // round 0: nobody contributes
+        vm.warp(block.timestamp + 7 days + 48 hours + 1);
+        pool.settle();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled), "full wipeout cancels");
+        assertEq(pool.memberCount(), 0, "all ejected");
+
+        for (uint256 i = 0; i < who.length; i++) {
+            uint256 b = usdc.balanceOf(who[i]);
+            vm.prank(who[i]); pool.claimRefund();
+            assertEq(usdc.balanceOf(who[i]) - b, CONTRIB, "stake recovered");
+        }
+        assertEq(usdc.balanceOf(address(pool)), 0, "no funds stranded");
+    }
+
+    /// Last-slot default: the final rotation recipient defaults, the pool can't
+    /// pay the last slot and cancels. Survivors recover stake + the stuck
+    /// cancelled-round contribution; the defaulter recovers their stake (a
+    /// disband voids slashing). Balance-exact, nothing strands.
+    function test_LastSlotDefault_DisbandReconciles() public {
+        address[] memory who = new address[](2);
+        who[0] = alice; who[1] = bob;
+        PotPool pool = _formPublicStaked(who);
+        address[] memory order = pool.getRotationOrder();
+        address survivor = order[0];
+        address defaulter = order[1]; // last slot
+
+        // round 0: both pay -> pays order[0] (survivor). currentRound -> 1
+        _contribute(pool, alice);
+        _contribute(pool, bob);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
+
+        // round 1: only the survivor pays; the last-slot member defaults
+        _contribute(pool, survivor);
+        vm.warp(block.timestamp + 7 days + 48 hours + 1);
+        pool.settle(); // ejects defaulter; last slot unpayable -> Cancelled
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled));
+
+        uint256 sBefore = usdc.balanceOf(survivor);
+        vm.prank(survivor); pool.claimRefund();
+        assertEq(usdc.balanceOf(survivor) - sBefore, CONTRIB * 2, "stake + stuck round contribution");
+
+        uint256 dBefore = usdc.balanceOf(defaulter);
+        vm.prank(defaulter); pool.claimRefund();
+        assertEq(usdc.balanceOf(defaulter) - dBefore, CONTRIB, "stake back (disband voids slash)");
+
+        assertEq(usdc.balanceOf(address(pool)), 0, "no funds stranded");
+    }
+
     // ------------------------------------------------------------------
     // TODO: audit-target edge cases (stubs — implement before mainnet)
     // ------------------------------------------------------------------
 
-    /// Gap: full-wipeout round. If EVERY remaining member misses the same round,
-    /// `_ejectMissers` empties `members` and `_payout` must cancel cleanly
-    /// rather than revert or pay a ghost. Assert state == Cancelled and no
-    /// USDC is sent to a non-member.
-    function testTODO_AllMembersMiss_CancelsCleanly() public {
-        vm.skip(true);
+    // Previously-stubbed audit targets, now covered by real tests:
+    //   - full wipeout            -> test_FullWipeout_DisbandRefundsAllStakes
+    //   - stake lock/release/slash -> test_PublicPool_Stake* + Slashed*
+    //   - disband refunds          -> test_FullWipeout / test_LastSlotDefault_DisbandReconciles
+    //   - claimRefund              -> test_PublicPool_StakeRefunded* + test_*Disband*
+    // Residual (still future work): lifetime net-position accounting across many
+    // partial rounds (the current disband refunds the cancelled round's
+    // contributions + stakes, not a full per-member in-minus-received ledger).
+
+    function test_cancelIfExpired() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 3, false, 0, false)); // private, 3 seats, won't fill
+        vm.expectRevert(bytes("Not expired"));
+        pool.cancelIfExpired();
+
+        vm.warp(block.timestamp + 7 days + 1);
+        pool.cancelIfExpired();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled));
+
+        vm.expectRevert(bytes("Not cancellable")); // already left Forming
+        pool.cancelIfExpired();
     }
 
-    /// Gap: stake deposit. The spec calls for each member to lock one round's
-    /// contribution at join, released at close, forfeited to remaining members
-    /// if ejected post-payout. Not yet implemented on-chain. Test the full
-    /// stake lifecycle once added.
-    function testTODO_StakeDeposit_LockReleaseForfeit() public {
-        vm.skip(true);
+    function test_startEarly() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 3, false, 0, false)); // private, 3 seats
+
+        vm.prank(bob);
+        vm.expectRevert(bytes("Only creator"));
+        pool.startEarly();
+
+        vm.prank(alice);
+        vm.expectRevert(bytes("Need 2+ members")); // only the creator so far
+        pool.startEarly();
+
+        vm.prank(alice); pool.invite(bob);
+        vm.prank(bob);   pool.join();
+        vm.prank(alice); pool.startEarly(); // RANDOM private -> Pending
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending));
+        _fulfill(pool);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
+
+        vm.prank(alice);
+        vm.expectRevert(bytes("Not forming"));
+        pool.startEarly();
     }
 
-    /// Gap: disband refund accounting. On early cancellation the contract should
-    /// return net contributions (total in minus total received) to the right
-    /// members. Test the reconciliation math.
-    function testTODO_Disband_RefundsNetContributions() public {
-        vm.skip(true);
-    }
+    /// Reentrancy: a malicious token that re-enters claimRefund during its refund
+    /// transfer is stopped by the ReentrancyGuard (no double-claim).
+    function test_Reentrancy_ClaimRefundBlocked() public {
+        ReentrantUSDC rtoken = new ReentrantUSDC();
+        PotScore s = new PotScore();
+        PotFactory f = new PotFactory(
+            address(s), treasury, address(rtoken), address(vrf),
+            KEY_HASH, CB_GAS_LIMIT, REQ_CONFIRMATIONS, NATIVE_PAYMENT
+        );
+        s.transferOwnership(address(f));
+        vrf.fundSubscription(f.vrfSubId(), 100 ether);
+        rtoken.mint(alice, 1_000e6);
 
-    /// Gap: reentrancy. Although CEI is in place and USDC is non-reentrant, a
-    /// malicious token (or a future non-USDC pool) could reenter `_payout`.
-    /// Test with a reentrant ERC-20 mock and assert no double-payout.
-    function testTODO_Payout_ReentrancyGuard() public {
-        vm.skip(true);
-    }
+        // public 2-seat pool, alice+bob stake; never fulfilled -> cancel after window
+        vm.prank(alice);
+        PotPool pool = PotPool(f.createPool(CONTRIB, 7, 2, true, 0, false));
+        rtoken.mint(bob, 1_000e6);
+        vm.startPrank(bob); rtoken.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
+        vm.startPrank(alice); rtoken.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        vm.warp(block.timestamp + 7 days + 1);
+        pool.cancelIfExpired();
 
-    /// Gap: lobby expiry. A pool that never fills must not strand its members in
-    /// `Forming` forever. After `formingDeadline` (7-day FORMING_WINDOW) anyone
-    /// may call `cancelIfExpired`; assert it reverts before the deadline, reverts
-    /// once the pool has left `Forming`, and otherwise flips state to `Cancelled`
-    /// and emits `PoolCancelled`.
-    function testTODO_cancelIfExpired() public {
-        vm.skip(true);
-    }
-
-    /// Gap: early start. The creator may launch an under-filled pool with
-    /// `startEarly` once 2+ members are in. Assert: non-creators are rejected,
-    /// a single-member pool is rejected, it only works while `Forming`, and a
-    /// successful call moves the pool to `Pending` (then `Active` once VRF calls
-    /// back) with a locked rotation order, plus a `PoolStartedEarly` event.
-    function testTODO_startEarly() public {
-        vm.skip(true);
-    }
-
-    /// Gap: refund on cancel. After `cancelIfExpired`, a member calls
-    /// `claimRefund`; assert it reverts unless `Cancelled`, reverts for
-    /// non-members, emits `RefundClaimed`, and the `refundClaimed` guard blocks a
-    /// second claim. Extend to assert the staked USDC is returned once stake
-    /// deposits are held on-chain (ties to testTODO_StakeDeposit_*).
-    function testTODO_claimRefund() public {
-        vm.skip(true);
+        // arm the token to re-enter claimRefund during the refund transfer
+        rtoken.arm(address(pool), abi.encodeWithSignature("claimRefund()"));
+        vm.prank(alice);
+        vm.expectRevert(); // ReentrancyGuard blocks the re-entrant call -> whole claim reverts
+        pool.claimRefund();
     }
 
     // ------------------------------------------------------------------

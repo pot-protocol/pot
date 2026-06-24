@@ -2,6 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import {VRFConsumerBaseV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
 import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import "./PotScore.sol";
@@ -18,7 +19,7 @@ import "./PotScore.sol";
 ///         can change the rotation order, skip a recipient, or withhold a
 ///         payout once the pool is Active. USDC moves only along the paths
 ///         encoded here.
-contract PotPool is VRFConsumerBaseV2Plus {
+contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
     IERC20 public immutable usdc;
     PotScore public immutable scoreContract;
     address public immutable protocolTreasury;
@@ -64,6 +65,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
     address[] public rotationOrder;  // payout order, locked at start, never mutated
     address[] private _fixedRotation; // creator-set order for a FIXED pool (optional)
     mapping(address => bool) public isMember;
+    mapping(address => bool) public everMember; // set on join, never cleared — lets ejected members reconcile on a disband
     mapping(address => bool) public hasInvite;
     mapping(address => bool) public refundClaimed; // guards against double stake claims after the pool ends
 
@@ -105,6 +107,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
         uint16 _minScore,
         address _scoreContract,
         address _treasury,
+        address _usdc,
         address _vrfCoordinator,
         bytes32 _vrfKeyHash,
         uint256 _vrfSubId,
@@ -130,7 +133,8 @@ contract PotPool is VRFConsumerBaseV2Plus {
         vrfRequestConfirmations = _vrfRequestConfirmations;
         vrfNativePayment = _vrfNativePayment;
         fixedOrdering = _fixedOrdering;
-        usdc = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913); // USDC on Base mainnet
+        require(_usdc != address(0), "Zero USDC");
+        usdc = IERC20(_usdc); // network's USDC, passed by the factory (was hardcoded to Base mainnet)
         state = PoolState.Forming;
         formingDeadline = block.timestamp + FORMING_WINDOW;
         _join(_creator);
@@ -152,7 +156,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
     ///         without skin in the game); private pools gate on an invite. A
     ///         RANDOM pool auto-starts once the roster is full and (if public)
     ///         everyone has staked; a FIXED pool waits for the creator to start it.
-    function join() external {
+    function join() external nonReentrant {
         require(state == PoolState.Forming, "Not forming");
         require(members.length < maxMembers, "Pool full");
         if (isPublic) {
@@ -171,7 +175,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
     ///         in `join`; the creator (who auto-joined at construction and can't
     ///         pre-approve a not-yet-deployed pool) calls this once. Starting the
     ///         creator's stake is what lets a full public pool begin.
-    function stake() external {
+    function stake() external nonReentrant {
         require(state == PoolState.Forming, "Not forming");
         require(isPublic, "Stake is for public pools only");
         require(isMember[msg.sender], "Not a member");
@@ -203,6 +207,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
     function _join(address addr) internal {
         require(!isMember[addr], "Already member");
         isMember[addr] = true;
+        everMember[addr] = true;
         members.push(addr);
         emit MemberJoined(addr);
     }
@@ -383,26 +388,42 @@ contract PotPool is VRFConsumerBaseV2Plus {
     }
 
     /// @notice After a public pool ends, a surviving member reclaims their stake.
-    ///         On clean **completion** they also receive an equal share of any
-    ///         slashed (defaulter) stakes. On **cancellation** (a pool that never
-    ///         started) they get their stake back with no slashing. Private pools
-    ///         hold no stake, so there is nothing to claim.
+    ///         The amount depends on how the pool ended:
+    ///         - **Complete** (clean finish): surviving stakers get their stake
+    ///           back plus an equal share of any slashed (defaulter) stakes.
+    ///         - **Cancelled** (a *disband* — never started, stuck in `Pending`,
+    ///           a full wipeout, or a last-slot default): every participant —
+    ///           **including ejected members** — gets their stake back (a disband
+    ///           voids slashing) plus any contribution they made to the cancelled
+    ///           round (which was never paid out). Earlier *completed* rounds are
+    ///           final and not clawed back.
+    ///         Private pools hold no stake; a private cancelled pool has nothing
+    ///         to claim (no contribution is stuck because it never had stakes).
     /// @dev    Pull-pattern + CEI: the `refundClaimed` guard is set before the
-    ///         single token transfer. Ejected defaulters are not `isMember`, so
-    ///         they cannot claim — their forfeited stake is the slashed pool.
-    ///         (Reconciling a *full-wipeout* cancellation — every member ejected
-    ///         the same round — is the separate disband/refund gap; those stakes
-    ///         currently strand. See ARCHITECTURE.md "Known gaps".)
-    function claimRefund() external {
+    ///         single transfer. The amounts are balance-exact in every end state:
+    ///         held funds = Σ stakes + the cancelled round's contributions =
+    ///         exactly what this distributes. This closes the disband/refund gap
+    ///         for these paths (lifetime net-position accounting across many
+    ///         partial rounds remains future work).
+    function claimRefund() external nonReentrant {
         require(state == PoolState.Complete || state == PoolState.Cancelled, "Pool not ended");
-        require(isMember[msg.sender], "Not a surviving member");
-        require(staked[msg.sender], "No stake to claim");
+        require(everMember[msg.sender], "Never a member");
         require(!refundClaimed[msg.sender], "Already claimed");
-
         refundClaimed[msg.sender] = true; // effect before interaction
-        uint256 amount = contributionAmount; // your stake back
-        if (state == PoolState.Complete && members.length > 0) {
-            amount += totalSlashed / members.length; // equal share of slashed stakes
+
+        uint256 amount;
+        if (state == PoolState.Complete) {
+            // Only survivors claim on a clean finish; defaulters forfeited via slash.
+            require(isMember[msg.sender], "Not a surviving member");
+            require(staked[msg.sender], "No stake to claim");
+            amount = contributionAmount; // stake back
+            if (members.length > 0) amount += totalSlashed / members.length; // share of slashed
+        } else {
+            // Disband: return the stake (no slashing) + any contribution stuck in
+            // the cancelled round. Open to ejected members too (everMember).
+            if (staked[msg.sender]) amount += contributionAmount;
+            if (contributed[currentRound][msg.sender]) amount += contributionAmount;
+            require(amount > 0, "Nothing to claim");
         }
         require(usdc.transfer(msg.sender, amount), "Stake refund failed");
         emit RefundClaimed(msg.sender);
@@ -416,7 +437,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
     ///         contract for `contributionAmount` USDC beforehand. On-time vs.
     ///         grace-period status is recorded to the member's Pot Score.
     ///         The final contributor of a round triggers settlement automatically.
-    function contribute() external {
+    function contribute() external nonReentrant {
         require(state == PoolState.Active, "Not active");
         require(isMember[msg.sender], "Not a member");
         require(!contributed[currentRound][msg.sender], "Already contributed");
@@ -447,7 +468,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
     /// @notice Permissionless settlement after the grace period: anyone may call
     ///         this to eject the round's defaulters and release the pot. This is
     ///         how a round closes if not everyone paid in time.
-    function settle() external {
+    function settle() external nonReentrant {
         require(state == PoolState.Active, "Not active");
         require(block.timestamp > roundDeadline + GRACE_PERIOD, "Grace not expired");
         _ejectMissers();
@@ -455,10 +476,14 @@ contract PotPool is VRFConsumerBaseV2Plus {
     }
 
     /// @dev Eject every member who did not contribute this round, leaving a
-    ///      permanent Pot Score mark on each. Swap-and-pop keeps the loop O(n);
-    ///      `i--` re-checks the swapped-in entry.
+    ///      permanent Pot Score mark on each (and slashing a public-pool stake).
+    ///      Swap-and-pop is O(n); a `while` loop re-checks the swapped-in entry
+    ///      at the same index without the index-0 underflow that an `i--` would
+    ///      hit — the old `if (i == 0) break` exited early when the first member
+    ///      was a defaulter, so a full wipeout did NOT eject everyone.
     function _ejectMissers() internal {
-        for (uint256 i = 0; i < members.length; i++) {
+        uint256 i = 0;
+        while (i < members.length) {
             address m = members[i];
             if (!contributed[currentRound][m]) {
                 isMember[m] = false;
@@ -473,8 +498,9 @@ contract PotPool is VRFConsumerBaseV2Plus {
                 emit MemberEjected(m, currentRound);
                 members[i] = members[members.length - 1];
                 members.pop();
-                if (i == 0) break; // avoid underflow when index 0 was the last entry
-                i--;
+                // do NOT advance i — re-check the element swapped into slot i
+            } else {
+                i++;
             }
         }
     }

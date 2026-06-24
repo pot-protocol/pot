@@ -35,11 +35,13 @@ const VRF = {
     coordinator: "0x5C210eF41CD1a72de73bF76eC39637bB0d3d7BEE",
     keyHash: "0x9e1344a1247c8a1785d0a4681a27152bffdb43666ae5bf7d14d24a5efd44bf71", // 30 gwei
     link: "0xE4aB69C077896252FAFBD49EFD26B5D171A32410",
+    usdc: "0x036CbD53842c5426634e7929541eC2318f3dCF7e", // Circle USDC on Base Sepolia — VERIFY before use
   },
   base: {
     coordinator: "0xd5D517aBE5cF79B7e95eC98dB0f0277788aFF634",
     keyHash: "0xdc2f87677b01473c763cb0aee938ed3341512f6057324a584e5944e786144d70", // 30 gwei
     link: "0x88Fb150BDc53A65fe94Dea0c9BA0a6dAf8C6e196",
+    usdc: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", // Circle USDC on Base mainnet
   },
 };
 
@@ -63,11 +65,14 @@ async function main() {
   const callbackGasLimit = Number(process.env.VRF_CALLBACK_GAS_LIMIT || 1_500_000);
   const requestConfirmations = Number(process.env.VRF_REQUEST_CONFIRMATIONS || 3);
   const nativePayment = (process.env.VRF_NATIVE_PAYMENT || "true").toLowerCase() === "true";
+  const usdc = process.env.USDC_ADDRESS || (defaults && defaults.usdc);
+  if (!usdc) throw new Error("Set USDC_ADDRESS (or add usdc to the network's config).");
 
   const [deployer] = await hre.ethers.getSigners();
   console.log("Deploying with account:", deployer.address);
   console.log("Network:", net);
   console.log("VRF coordinator:", coordinator, "| native payment:", nativePayment);
+  console.log("USDC:", usdc);
 
   // 1. PotScore — soulbound reputation registry.
   const PotScore = await hre.ethers.getContractFactory("PotScore");
@@ -81,6 +86,7 @@ async function main() {
   const factory = await PotFactory.deploy(
     scoreAddr,
     treasury,
+    usdc,
     coordinator,
     keyHash,
     callbackGasLimit,
@@ -121,7 +127,7 @@ async function main() {
   console.log(`  npx hardhat verify --network ${net} ${scoreAddr}`);
   console.log(
     `  npx hardhat verify --network ${net} ${factoryAddr} ` +
-      `${scoreAddr} ${treasury} ${coordinator} ${keyHash} ${callbackGasLimit} ${requestConfirmations} ${nativePayment}`
+      `${scoreAddr} ${treasury} ${usdc} ${coordinator} ${keyHash} ${callbackGasLimit} ${requestConfirmations} ${nativePayment}`
   );
 }
 

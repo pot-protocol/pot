@@ -21,6 +21,7 @@ import "./PotScore.sol";
 contract PotFactory {
     PotScore public immutable scoreContract;
     address public immutable protocolTreasury;
+    address public immutable usdc; // the network's USDC, passed to every pool (was hardcoded in PotPool)
 
     // --- Chainlink VRF v2.5 ---
     // The factory owns ONE subscription (created in the constructor) and adds
@@ -52,6 +53,7 @@ contract PotFactory {
     constructor(
         address _scoreContract,
         address _treasury,
+        address _usdc,
         address _vrfCoordinator,
         bytes32 _vrfKeyHash,
         uint32 _vrfCallbackGasLimit,
@@ -59,9 +61,11 @@ contract PotFactory {
         bool _vrfNativePayment
     ) {
         require(_scoreContract != address(0) && _treasury != address(0), "Zero address");
+        require(_usdc != address(0), "Zero USDC");
         require(_vrfCoordinator != address(0), "Zero VRF coordinator");
         scoreContract = PotScore(_scoreContract);
         protocolTreasury = _treasury;
+        usdc = _usdc;
         vrfCoordinator = IVRFCoordinatorV2Plus(_vrfCoordinator);
         vrfKeyHash = _vrfKeyHash;
         vrfCallbackGasLimit = _vrfCallbackGasLimit;
@@ -108,6 +112,7 @@ contract PotFactory {
             minScoreRequired,
             address(scoreContract),
             protocolTreasury,
+            usdc,
             address(vrfCoordinator),
             vrfKeyHash,
             vrfSubId,
