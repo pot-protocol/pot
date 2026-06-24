@@ -78,16 +78,20 @@ contract PotFactory {
     /// @param memberCount        Target roster size, 2–10.
     /// @param isPublic           Open to score-gated strangers, or invite-only.
     /// @param minScoreRequired   Pot Score gate for public pools.
+    /// @param useFixedOrder      Private-pool option: creator-set/join payout order
+    ///                           (skips VRF). Rejected for public pools.
     function createPool(
         uint256 contributionAmount,
         uint8 intervalDays,
         uint8 memberCount,
         bool isPublic,
-        uint16 minScoreRequired
+        uint16 minScoreRequired,
+        bool useFixedOrder
     ) external returns (address) {
         require(contributionAmount >= 25e6, "Minimum $25");
         require(memberCount >= 2 && memberCount <= 10, "2-10 members");
         require(intervalDays == 7 || intervalDays == 30, "Weekly or monthly");
+        require(!useFixedOrder || !isPublic, "Public pools must use random ordering");
         if (isPublic) {
             require(
                 scoreContract.getScore(msg.sender) >= minScoreRequired,
@@ -109,7 +113,8 @@ contract PotFactory {
             vrfSubId,
             vrfCallbackGasLimit,
             vrfRequestConfirmations,
-            vrfNativePayment
+            vrfNativePayment,
+            useFixedOrder
         );
 
         // Critical wiring: let this pool record reputation. Without this, every

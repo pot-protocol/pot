@@ -131,9 +131,19 @@ never reaches `maxMembers` is never stuck:
    (same VRF request, same two-phase lock) and emits an extra `PoolStartedEarly`
    marker.
 
-**Locking rotation (two-phase, Chainlink VRF v2.5).** Starting a pool is split
-into a request and a callback so the payout order is seeded by *verifiable*
-randomness the trigger transaction cannot influence:
+**Ordering mode (`fixedOrdering`).** How the payout order is set is a per-pool
+choice, gated on `isPublic`. **RANDOM** (default) uses the VRF flow below.
+**FIXED** (private pools only — construction reverts if `fixedOrdering ∧ isPublic`)
+locks a creator-set order (`setRotationOrder`, a permutation of members so the
+circle can arrange by *need*) or, if unset/stale, the join order — and **skips
+VRF entirely**: no `Pending`, no subscription cost, instant `Active` via
+`_lockFixedOrder`. FIXED pools don't auto-start on fill; the creator calls
+`startEarly`, which is the window to set the order. The seam for both modes is
+`_beginStart`. The rest of this section describes the RANDOM (VRF) path.
+
+**Locking rotation (RANDOM mode — two-phase, Chainlink VRF v2.5).** Starting a
+RANDOM pool is split into a request and a callback so the payout order is seeded
+by *verifiable* randomness the trigger transaction cannot influence:
 
 1. **`_requestRotation`** (phase 1) — fired when the roster fills, or by the
    creator via `startEarly`. It moves the pool to a new **`Pending`** state and
@@ -281,7 +291,7 @@ are tracked as `testTODO_*` stubs in
 | 8 | **Hardcoded USDC address.** `PotPool` hardcodes Base mainnet USDC, which makes unit testing awkward (the test suite uses `vm.etch` to work around it). | **Open** — recommend taking the token address as a constructor arg so tests and other chains are first-class. | Low |
 | 9 | **Lobby / expiry mechanics.** A pool that never filled used to sit in `Forming` forever, stranding whoever joined early with no recourse. | **Added (this pass)** — `formingDeadline` (7-day `FORMING_WINDOW`) + permissionless `cancelIfExpired`, creator-only `startEarly` (2+ members, reuses `_requestRotation`), and a `claimRefund` stub guarded by `refundClaimed`. The refund **transfer** is still a stub (no stakes held on-chain yet) and lands with #5/#6. | — |
 | 10 | **Sybil / reputation farming.** A ring of colluding wallets can run fake circles among themselves — everyone "pays" on time — to cheaply farm high Pot Scores, then use that inflated reputation to enter or abuse public stranger pools. This attacks the reputation layer that is the protocol's entire trust thesis. | **Open** — needs anti-Sybil design: stake-at-risk per pool, counterparty-diversity weighting in `getScore`, per-cluster cost-to-fake, or a proof-of-personhood gate for public pools. Surfaced in user feedback 2026-06-24. | High |
-| 11 | **Rotation positional value (fairness beyond the draw).** Even with a perfectly fair VRF draw, the time value of money makes early slots genuinely worth more than late ones (months of forgone returns), so being "last" is a real economic loss. VRF fixes draw *integrity*, not positional *value*. | **Open (design)** — candidate mechanisms: a "never last two pools in a row" guarantee (`PotScore` already stores per-wallet history), or reputation-bidding for position (bid score, not cash). A *cash* auction for slots was considered and rejected — it reintroduces money/yield and the banking/compliance burden the 0%-fee design exists to avoid. Surfaced in user feedback 2026-06-24. | Medium (product) |
+| 11 | **Rotation positional value (fairness beyond the draw).** Even with a perfectly fair VRF draw, the time value of money makes early slots genuinely worth more than late ones, so being "last" is a real economic loss. VRF fixes draw *integrity*, not positional *value*. | **Partially addressed (this pass)** — shipped per-pool ordering choice (`PotPool.fixedOrdering`): **private** pools may use a creator-set or join order so the circle arranges by *need* (and skip VRF); **public** pools are forced to VRF. This reframes the problem (return fairness to the humans who can express need) rather than engineering a constrained shuffle, which was rejected as a fig leaf — slot N−1 ≈ slot N. Lifetime position-balancing / reputation-bidding deferred to v2. See `DESIGN-fairness-and-sybil.md`. | Medium (product) |
 
 **Do not deploy to mainnet until #4, #5, #6, and #10 are closed and the system
 has a third-party audit.** (#2 weak randomness is now resolved via Chainlink VRF.)

@@ -38,6 +38,13 @@ contract PotPool is VRFConsumerBaseV2Plus {
     uint16  public immutable vrfRequestConfirmations;
     bool    public immutable vrfNativePayment;      // pay VRF in native (ETH) vs LINK
 
+    // --- Ordering mode (v1.1) ---
+    // false (default) = RANDOM: rotation order comes from Chainlink VRF.
+    // true = FIXED: a creator-set (or join-order) sequence — allowed for PRIVATE
+    // pools only, where trust is social. A FIXED pool skips VRF entirely (no
+    // Pending state, no LINK/ETH cost) and starts instantly.
+    bool public immutable fixedOrdering;
+
     uint16 public constant PROTOCOL_FEE_BPS = 0; // 0% — protocol takes nothing; you put in $X, you get back $X
     uint48 public constant GRACE_PERIOD = 48 hours;
     uint48 public constant FORMING_WINDOW = 7 days; // lobby lifetime before a stuck pool can be cancelled
@@ -55,6 +62,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
 
     address[] public members;        // live roster (ejections remove entries)
     address[] public rotationOrder;  // payout order, locked at start, never mutated
+    address[] private _fixedRotation; // creator-set order for a FIXED pool (optional)
     mapping(address => bool) public isMember;
     mapping(address => bool) public hasInvite;
     mapping(address => bool) public refundClaimed; // guards against double refunds after a cancellation
@@ -67,6 +75,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
     event RotationRequested(uint256 indexed requestId);
     event RotationRetried(uint256 indexed oldRequestId, uint256 indexed newRequestId);
     event PoolStarted(address[] rotationOrder);
+    event FixedOrderSet(address[] order);
     event ContributionReceived(address indexed member, uint8 round);
     event PotPaid(address indexed recipient, uint8 round, uint256 amount);
     event MemberEjected(address indexed member, uint8 round);
@@ -89,8 +98,12 @@ contract PotPool is VRFConsumerBaseV2Plus {
         uint256 _vrfSubId,
         uint32 _vrfCallbackGasLimit,
         uint16 _vrfRequestConfirmations,
-        bool _vrfNativePayment
+        bool _vrfNativePayment,
+        bool _fixedOrdering
     ) VRFConsumerBaseV2Plus(_vrfCoordinator) {
+        // A public/stranger pool must never let its creator hand out slots — VRF
+        // is mandatory there. FIXED ordering is for private pools only.
+        require(!_fixedOrdering || !_isPublic, "Public pools must use random ordering");
         creator = _creator;
         contributionAmount = _contributionAmount;
         intervalDays = _intervalDays;
@@ -104,6 +117,7 @@ contract PotPool is VRFConsumerBaseV2Plus {
         vrfCallbackGasLimit = _vrfCallbackGasLimit;
         vrfRequestConfirmations = _vrfRequestConfirmations;
         vrfNativePayment = _vrfNativePayment;
+        fixedOrdering = _fixedOrdering;
         usdc = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913); // USDC on Base mainnet
         state = PoolState.Forming;
         formingDeadline = block.timestamp + FORMING_WINDOW;
@@ -122,8 +136,10 @@ contract PotPool is VRFConsumerBaseV2Plus {
     }
 
     /// @notice Join a forming pool. Public pools gate on Pot Score; private
-    ///         pools gate on an invite from the creator. The pool auto-starts
-    ///         once the roster is full.
+    ///         pools gate on an invite from the creator. A RANDOM-order pool
+    ///         auto-starts once the roster is full; a FIXED-order pool waits for
+    ///         the creator to start it (via startEarly), which is the window in
+    ///         which the creator can call setRotationOrder.
     function join() external {
         require(state == PoolState.Forming, "Not forming");
         require(members.length < maxMembers, "Pool full");
@@ -133,8 +149,8 @@ contract PotPool is VRFConsumerBaseV2Plus {
             require(hasInvite[msg.sender] || msg.sender == creator, "No invite");
         }
         _join(msg.sender);
-        if (members.length == maxMembers) {
-            _requestRotation();
+        if (members.length == maxMembers && !fixedOrdering) {
+            _beginStart();
         }
     }
 
@@ -143,6 +159,68 @@ contract PotPool is VRFConsumerBaseV2Plus {
         isMember[addr] = true;
         members.push(addr);
         emit MemberJoined(addr);
+    }
+
+    /// @notice FIXED-order private pool: the creator sets the payout order so the
+    ///         circle can arrange by need (e.g. who needs the lump sum first).
+    ///         Must be a permutation of the *current* members. It's re-validated
+    ///         at start — if someone joined afterward, or it was never set, the
+    ///         pool falls back to join order (both are valid rotations).
+    function setRotationOrder(address[] calldata order) external {
+        require(msg.sender == creator, "Only creator");
+        require(state == PoolState.Forming, "Not forming");
+        require(fixedOrdering, "Pool uses random ordering");
+        require(order.length == members.length, "Must cover all members");
+        delete _fixedRotation;
+        for (uint256 i = 0; i < order.length; i++) {
+            require(isMember[order[i]], "Not a member");
+            for (uint256 j = 0; j < i; j++) {
+                require(order[j] != order[i], "Duplicate member");
+            }
+            _fixedRotation.push(order[i]);
+        }
+        emit FixedOrderSet(order);
+    }
+
+    /// @dev Start dispatch — the single seam used by both auto-start-on-fill and
+    ///      startEarly. FIXED pools lock their order with no randomness and go
+    ///      Active instantly; RANDOM pools request a VRF seed (two-phase).
+    function _beginStart() internal {
+        if (fixedOrdering) {
+            _lockFixedOrder();
+        } else {
+            _requestRotation();
+        }
+    }
+
+    /// @dev FIXED-order start: lock the creator-set order if it's a complete,
+    ///      current permutation of members; otherwise default to join order
+    ///      (`members` as-is) — both are valid rotations. No VRF, no `Pending`:
+    ///      friend pools start instantly and cost no subscription.
+    function _lockFixedOrder() internal {
+        if (_fixedRotation.length == members.length && _isCurrentPermutation(_fixedRotation)) {
+            rotationOrder = _fixedRotation;
+        } else {
+            rotationOrder = members;
+        }
+        state = PoolState.Active;
+        currentRound = 0;
+        roundDeadline = block.timestamp + (uint256(intervalDays) * 1 days);
+        scoreContract.onPoolStarted(members);
+        emit PoolStarted(rotationOrder);
+    }
+
+    /// @dev True iff `order` lists every current member exactly once (n ≤ 10, so
+    ///      the O(n²) duplicate check is cheap).
+    function _isCurrentPermutation(address[] storage order) internal view returns (bool) {
+        if (order.length != members.length) return false;
+        for (uint256 i = 0; i < order.length; i++) {
+            if (!isMember[order[i]]) return false;
+            for (uint256 j = 0; j < i; j++) {
+                if (order[j] == order[i]) return false;
+            }
+        }
+        return true;
     }
 
     /// @dev Two-phase start, phase 1. Park the pool in `Pending` and ask
@@ -223,18 +301,19 @@ contract PotPool is VRFConsumerBaseV2Plus {
         emit RotationRetried(oldId, vrfRequestId);
     }
 
-    /// @notice Creator kicks off an under-filled pool without waiting for every
-    ///         seat. Only valid while `Forming` and only once at least two
-    ///         members are in, so the smallest viable circle (a pair) can run.
-    ///         Reuses `_requestRotation` verbatim — same VRF request, same
-    ///         two-phase lock — so an early start and a full-capacity start are
-    ///         mechanically identical, randomness path included.
+    /// @notice Creator kicks off a pool without waiting for every seat. Valid
+    ///         while `Forming` with at least two members, so the smallest viable
+    ///         circle (a pair) can run. This is also the *only* way a FIXED-order
+    ///         pool starts (it doesn't auto-start on fill), which is what gives
+    ///         the creator a window to call setRotationOrder first. Routes through
+    ///         `_beginStart`, so RANDOM pools request VRF and FIXED pools lock
+    ///         their order — an early start and a full start are identical.
     function startEarly() external {
         require(msg.sender == creator, "Only creator");
         require(state == PoolState.Forming, "Not forming");
         require(members.length >= 2, "Need 2+ members");
         emit PoolStartedEarly(uint8(members.length));
-        _requestRotation();
+        _beginStart();
     }
 
     /// @notice Permissionless escape hatch for a pool that never filled. Once the

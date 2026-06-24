@@ -88,7 +88,7 @@ contract PotPoolTest is Test {
 
     function test_CreatePool_IndexesAndAuthorizes() public {
         vm.prank(alice);
-        address poolAddr = factory.createPool(CONTRIB, 7, 2, false, 0);
+        address poolAddr = factory.createPool(CONTRIB, 7, 2, false, 0, false);
 
         assertEq(factory.totalPools(), 1);
         assertTrue(factory.isPool(poolAddr));
@@ -103,12 +103,12 @@ contract PotPoolTest is Test {
     function test_CreatePool_RejectsBelowMinimum() public {
         vm.prank(alice);
         vm.expectRevert(bytes("Minimum $25"));
-        factory.createPool(24e6, 7, 2, false, 0);
+        factory.createPool(24e6, 7, 2, false, 0, false);
     }
 
     function test_PrivatePool_RequiresInvite() public {
         vm.prank(alice);
-        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, false));
 
         vm.prank(bob);
         vm.expectRevert(bytes("No invite"));
@@ -145,7 +145,7 @@ contract PotPoolTest is Test {
     /// only requests randomness. No funds can enter while Pending.
     function test_FillRequestsRandomness_NoOrderUntilFulfilled() public {
         vm.prank(alice);
-        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, false));
         vm.prank(alice);
         pool.invite(bob);
         vm.prank(bob);
@@ -174,7 +174,7 @@ contract PotPoolTest is Test {
     /// from any other address must revert — otherwise anyone could pick the order.
     function test_FulfillRandomWords_RejectsNonCoordinator() public {
         vm.prank(alice);
-        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, false));
         vm.prank(alice);
         pool.invite(bob);
         vm.prank(bob);
@@ -198,7 +198,7 @@ contract PotPoolTest is Test {
     /// only the new request can activate the pool.
     function test_RetryRotation_ReissuesAfterWindowAndStaleCallbackNoOps() public {
         vm.prank(alice);
-        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, false));
         vm.prank(alice);
         pool.invite(bob);
         vm.prank(bob);
@@ -226,6 +226,99 @@ contract PotPoolTest is Test {
         // The current request activates the pool.
         vrf.fulfillRandomWordsWithOverride(secondId, address(pool), words);
         assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
+    }
+
+    // ------------------------------------------------------------------
+    // Ordering mode (FIXED vs RANDOM) — v1.1
+    // ------------------------------------------------------------------
+
+    /// A private FIXED pool does NOT auto-start on fill and never requests VRF;
+    /// the creator starts it, locking the join order, instantly Active.
+    function test_FixedPrivatePool_StartsWithoutVRF() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, true)); // private, FIXED
+        vm.prank(alice); pool.invite(bob);
+        vm.prank(bob);  pool.join(); // fills the roster but must NOT auto-start
+
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Forming), "FIXED must not auto-start on fill");
+        assertEq(pool.vrfRequestId(), 0, "FIXED must not request VRF");
+
+        vm.prank(alice); pool.startEarly(); // creator starts -> instant Active, no VRF callback
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
+        address[] memory order = pool.getRotationOrder();
+        assertEq(order.length, 2);
+        assertEq(order[0], alice, "join order: creator first");
+        assertEq(order[1], bob);
+        assertEq(pool.vrfRequestId(), 0, "still no VRF");
+    }
+
+    /// A public pool may never use FIXED ordering (creator can't hand out slots).
+    function test_FixedPublicPool_Reverts() public {
+        vm.prank(alice);
+        vm.expectRevert(bytes("Public pools must use random ordering"));
+        factory.createPool(CONTRIB, 7, 2, true, 0, true); // public + fixed -> reject at factory
+    }
+
+    /// The creator can arrange the payout order by need before starting.
+    function test_SetRotationOrder_ReordersByCreator() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, true));
+        vm.prank(alice); pool.invite(bob);
+        vm.prank(bob);  pool.join();
+
+        address[] memory ord = new address[](2);
+        ord[0] = bob; ord[1] = alice; // bob needs it first
+        vm.prank(alice); pool.setRotationOrder(ord);
+        vm.prank(alice); pool.startEarly();
+
+        address[] memory got = pool.getRotationOrder();
+        assertEq(got[0], bob, "creator-set order respected");
+        assertEq(got[1], alice);
+    }
+
+    /// setRotationOrder rejects non-permutations and random-order pools.
+    function test_SetRotationOrder_RejectsBadInput() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, true));
+        vm.prank(alice); pool.invite(bob);
+        vm.prank(bob);  pool.join();
+
+        address[] memory short_ = new address[](1); short_[0] = alice;
+        vm.prank(alice); vm.expectRevert(bytes("Must cover all members"));
+        pool.setRotationOrder(short_);
+
+        address[] memory dup = new address[](2); dup[0] = alice; dup[1] = alice;
+        vm.prank(alice); vm.expectRevert(bytes("Duplicate member"));
+        pool.setRotationOrder(dup);
+
+        address[] memory nonmem = new address[](2); nonmem[0] = alice; nonmem[1] = carol;
+        vm.prank(alice); vm.expectRevert(bytes("Not a member"));
+        pool.setRotationOrder(nonmem);
+
+        // a RANDOM-order pool rejects setRotationOrder outright
+        vm.prank(alice);
+        PotPool randPool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, false));
+        address[] memory one = new address[](1); one[0] = alice;
+        vm.prank(alice); vm.expectRevert(bytes("Pool uses random ordering"));
+        randPool.setRotationOrder(one);
+    }
+
+    /// A FIXED pool pays out in the set order and completes the full lifecycle.
+    function test_FixedPool_PaysInSetOrderAndCompletes() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, true));
+        vm.prank(alice); pool.invite(bob);
+        vm.prank(bob);  pool.join();
+        address[] memory ord = new address[](2); ord[0] = bob; ord[1] = alice;
+        vm.prank(alice); pool.setRotationOrder(ord);
+        vm.prank(alice); pool.startEarly();
+
+        uint256 bobBefore = usdc.balanceOf(bob);
+        _contribute(pool, alice); _contribute(pool, bob); // round 0 -> bob (slot 0)
+        assertEq(usdc.balanceOf(bob) - bobBefore, CONTRIB * 2 - CONTRIB, "bob nets pot minus own stake");
+
+        _contribute(pool, alice); _contribute(pool, bob); // round 1 -> alice, completes
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Complete));
     }
 
     // ------------------------------------------------------------------
@@ -413,7 +506,7 @@ contract PotPoolTest is Test {
 
     function _form2(address a, address b) internal returns (PotPool pool) {
         vm.prank(a);
-        pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0, false));
         vm.prank(a);
         pool.invite(b);
         vm.prank(b);
@@ -423,7 +516,7 @@ contract PotPoolTest is Test {
 
     function _form3(address a, address b, address c) internal returns (PotPool pool) {
         vm.prank(a);
-        pool = PotPool(factory.createPool(CONTRIB, 7, 3, false, 0));
+        pool = PotPool(factory.createPool(CONTRIB, 7, 3, false, 0, false));
         vm.startPrank(a);
         pool.invite(b);
         pool.invite(c);
