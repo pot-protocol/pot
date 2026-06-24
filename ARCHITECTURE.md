@@ -286,6 +286,11 @@ are tracked as `testTODO_*` stubs in
 **Do not deploy to mainnet until #4, #5, #6, and #10 are closed and the system
 has a third-party audit.** (#2 weak randomness is now resolved via Chainlink VRF.)
 
+Design proposals for the two newest gaps — **#10 Sybil/reputation-farming** and
+**#11 positional fairness** — with options, recommendations, and the decisions
+that need your call, are in
+[`DESIGN-fairness-and-sybil.md`](DESIGN-fairness-and-sybil.md).
+
 ---
 
 ## Spinning up a local instance from scratch
