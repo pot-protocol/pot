@@ -678,6 +678,16 @@ a { color: inherit; }
 @media (prefers-reduced-motion: reduce) {
   .explainer-wrap { aspect-ratio: auto; overflow: visible; }
 }
+/* On narrow screens a 16/9 box is too short to hold heading + visual + copy
+   without clipping. Relax the ratio to a portrait-friendly min-height so every
+   scene's text stays fully visible; the .mcx container query sizing adapts. */
+@media (max-width: 620px) {
+  .explainer-wrap {
+    aspect-ratio: auto;
+    min-height: clamp(420px, 86vw, 520px);
+    height: clamp(420px, 86vw, 520px);
+  }
+}
 
 /* ---------- FAQ ---------- */
 .faq {

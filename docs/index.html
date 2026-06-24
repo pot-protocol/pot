@@ -39,6 +39,11 @@
       font-family: "Inter", system-ui, -apple-system, sans-serif;
       line-height: 1.6;
       color: var(--ink);
+      /* Size scene contents off the ACTUAL explainer box (cqh/cqw), not the
+         viewport — the box is 16/9 and often far shorter than the screen, so
+         viewport units let copy overflow + clip behind the controls. */
+      container-type: size;
+      container-name: mcx;
     }
     .mcx * { box-sizing: border-box; }
 
@@ -77,56 +82,72 @@
       flex-direction: column;
       align-items: center;
       justify-content: center;
-      gap: clamp(1.1rem, 3vh, 2.2rem);
-      padding: clamp(1.6rem, 4vw, 2.8rem) clamp(1.2rem, 5vw, 2.6rem) clamp(4.2rem, 8vh, 5.4rem);
+      /* Vertical rhythm scales with the box height (cqh), so a short 16/9
+         frame stays tight and a tall one breathes — never viewport-driven. */
+      gap: clamp(0.7rem, 3cqh, 1.8rem);
+      /* Bottom padding clears the controls pill (~52px tall + its own
+         bottom offset). Top/side padding scale with the box. */
+      padding: clamp(1.1rem, 5cqh, 2.4rem) clamp(1.2rem, 5cqw, 2.6rem) clamp(3.8rem, 12cqh, 4.8rem);
       text-align: center;
       opacity: 0;
       visibility: hidden;
-      transition: opacity 0.5s ease, visibility 0s linear 0.5s;
+      transition: opacity 0.4s ease, visibility 0s linear 0.4s;
       pointer-events: none;
     }
     .mcx .scene.is-active {
       opacity: 1;
       visibility: visible;
-      transition: opacity 0.5s ease, visibility 0s linear 0s;
+      transition: opacity 0.4s ease, visibility 0s linear 0s;
       pointer-events: auto;
     }
 
-    .mcx .scene__copy { max-width: 640px; }
+    /* Copy blocks are guaranteed their space; the visual yields instead. */
+    .mcx .scene__copy { max-width: 640px; flex: 0 0 auto; }
     .mcx .scene__eyebrow {
       display: block;
-      font-size: 0.74rem;
+      font-size: clamp(0.62rem, 1.9cqw, 0.74rem);
       font-weight: 600;
       letter-spacing: 0.18em;
       text-transform: uppercase;
       color: var(--terracotta-deep);
-      margin-bottom: 0.7rem;
+      margin-bottom: clamp(0.35rem, 1.4cqh, 0.7rem);
     }
     .mcx .scene__title {
       font-family: "Playfair Display", Georgia, serif;
       font-weight: 700;
-      font-size: clamp(1.5rem, 4.4vw, 2.5rem);
+      font-size: clamp(1.25rem, 5.2cqw, 2.45rem);
       line-height: 1.12;
       letter-spacing: -0.01em;
       color: var(--ink);
-      margin: 0 0 0.55rem;
+      margin: 0 0 clamp(0.3rem, 1.2cqh, 0.55rem);
     }
     .mcx .scene__sub {
-      font-size: clamp(0.95rem, 2.2vw, 1.12rem);
+      font-size: clamp(0.86rem, 2.7cqw, 1.12rem);
+      line-height: 1.5;
       color: var(--ink-soft);
       max-width: 36rem;
       margin: 0 auto;
     }
     .mcx .scene__sub strong { color: var(--ink); }
 
+    /* The visual is the middle band. Its height tracks the BOX (cqh), not the
+       viewport — the old 30vh let it grow to 300px inside a ~506px-tall frame,
+       which shoved the copy below it past the bottom edge (the clipping bug).
+       It can also shrink (min-height:0) so the copy always keeps its space. */
     .mcx .scene__visual {
       display: flex;
       align-items: center;
       justify-content: center;
       width: 100%;
       max-width: 460px;
-      height: clamp(170px, 30vh, 300px);
+      flex: 0 1 auto;
+      min-height: 0;
+      height: clamp(140px, 34cqh, 280px);
     }
+    /* SVG visuals (scenes 1–3) fill the band; div-card visuals (4–6) keep
+       their natural size but never exceed it. */
+    .mcx .scene__visual > svg { width: 100%; height: 100%; }
+    .mcx .scene__visual > :not(svg) { max-height: 100%; }
 
     .mcx .scene.is-active .scene__copy { animation: mcxRiseIn 0.7s ease both; }
     .mcx .scene.is-active .scene__visual { animation: mcxRiseIn 0.7s ease 0.08s both; }
@@ -588,7 +609,7 @@
     /* ---------- Controls ---------- */
     .mcx .controls {
       position: absolute;
-      bottom: clamp(0.7rem, 2.2vh, 1.3rem);
+      bottom: clamp(0.7rem, 2.6cqh, 1.3rem);
       left: 50%;
       transform: translateX(-50%);
       z-index: 40;
@@ -675,7 +696,9 @@
 
     /* ---------- Reduced motion: static stacked cards ---------- */
     @media (prefers-reduced-motion: reduce) {
-      .mcx { height: auto; overflow: visible; }
+      /* Stacked static cards must grow past 16/9 — drop the size container so
+         .mcx can height:auto to its content (container-type:size would clamp it). */
+      .mcx { height: auto; overflow: visible; container-type: normal; }
       .mcx .stage { position: relative; inset: auto; height: auto; overflow: visible; padding-bottom: 1.5rem; }
       .mcx .progress, .mcx .controls { display: none; }
       .mcx .scene {
@@ -685,9 +708,14 @@
         visibility: visible !important;
         pointer-events: auto;
         min-height: clamp(380px, 70vh, 560px);
+        gap: 1.6rem;
+        padding: 2.2rem 1.6rem 2.4rem;
         border-bottom: 1px solid var(--line);
       }
       .mcx .scene *, .mcx .scene.is-active * { animation: none !important; }
+      .mcx .scene__visual { flex: 0 0 auto; height: clamp(180px, 30vh, 260px); max-height: none; }
+      .mcx .scene__title { font-size: clamp(1.5rem, 4.4vw, 2.5rem); }
+      .mcx .scene__sub { font-size: clamp(0.95rem, 2.2vw, 1.12rem); }
       .mcx .scene__copy, .mcx .scene__visual { opacity: 1 !important; transform: none !important; }
       .mcx .village__house { opacity: 0.9 !important; transform: none !important; }
       .mcx .villager, .mcx .villager--body { opacity: 0.92 !important; }
@@ -708,9 +736,10 @@
       .mcx .cta-seat { background: var(--terracotta) !important; box-shadow: 0 0 0 4px rgba(194,113,79,0.18) !important; }
     }
 
-    /* Short embed box: tighten the visual so copy never clips */
+    /* Very short viewport fallback: cap the visual harder so copy keeps room.
+       (Primary short-box handling is the container-query sizing above.) */
     @media (max-height: 560px) {
-      .mcx .scene__visual { height: clamp(120px, 26vh, 180px); }
+      .mcx .scene__visual { max-height: clamp(120px, 24cqh, 170px); }
       .mcx .scene__title { margin-bottom: 0.3rem; }
     }
   </style>
@@ -2049,8 +2078,8 @@
       var root = document.getElementById('mcx');
       if (!root) return;
 
-      var SCENE_MS = 15000;            // 15s per scene
-      var SCENE_COUNT = 6;             // 6 scenes → 90s total
+      var SCENE_MS = 7500;             // 7.5s per scene — snappy product-explainer pacing
+      var SCENE_COUNT = 6;             // 6 scenes → ~45s total (7.5s hold + 0.5s fade overlap)
 
       var prefersReduced = window.matchMedia &&
         window.matchMedia('(prefers-reduced-motion: reduce)').matches;
