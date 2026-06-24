@@ -27,6 +27,9 @@ module.exports = {
       },
       // viaIR helps with the stack depth in PotPool's lifecycle methods.
       viaIR: true,
+      // Base is post-Cancun; pin it explicitly so dependency code that emits
+      // `mcopy` (OZ v5, Chainlink) compiles. Must match foundry.toml's evm_version.
+      evmVersion: "cancun",
     },
   },
   networks: {

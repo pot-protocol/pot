@@ -15,11 +15,16 @@ test = "test"
 out = "out"
 libs = ["node_modules", "lib"]
 solc_version = "0.8.24"
+evm_version = "cancun" # Base is post-Cancun; pin to match hardhat.config.js
 optimizer = true
 optimizer_runs = 200
 via_ir = true
 
 remappings = [
     "@openzeppelin/contracts/=node_modules/@openzeppelin/contracts/",
+    # Chainlink's VRF v2.5 test mock (SubscriptionAPI) pins this exact OZ version.
+    # Only the mock needs it; the production contracts use OZ v5 above.
+    "@openzeppelin/contracts@4.9.6/=node_modules/@openzeppelin/contracts-4.9.6/",
+    "@chainlink/contracts/=node_modules/@chainlink/contracts/",
     "forge-std/=lib/forge-std/src/",
 ]

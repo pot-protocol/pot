@@ -15,5 +15,8 @@
     "@nomicfoundation/hardhat-toolbox": "^5.0.0",
     "@openzeppelin/contracts": "^5.0.2",
     "hardhat": "^2.22.0"
+  },
+  "dependencies": {
+    "@chainlink/contracts": "^1.5.0"
   }
 }

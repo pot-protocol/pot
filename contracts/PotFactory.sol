@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 pragma solidity ^0.8.20;
 
+import {IVRFCoordinatorV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/interfaces/IVRFCoordinatorV2Plus.sol";
 import "./PotPool.sol";
 import "./PotScore.sol";
 
@@ -21,6 +22,21 @@ contract PotFactory {
     PotScore public immutable scoreContract;
     address public immutable protocolTreasury;
 
+    // --- Chainlink VRF v2.5 ---
+    // The factory owns ONE subscription (created in the constructor) and adds
+    // every pool it deploys as a consumer. Fund this subscription on the
+    // coordinator (LINK or native, matching `vrfNativePayment`) before pools can
+    // start; at PROTOCOL_FEE_BPS = 0 the protocol/treasury subsidizes it, which
+    // keeps the "put in $X, get back $X" promise intact. Switching to a per-pool
+    // VRF fee later is a localized change (a fee constant + a collection step),
+    // not a re-architecture.
+    IVRFCoordinatorV2Plus public immutable vrfCoordinator;
+    uint256 public immutable vrfSubId;
+    bytes32 public immutable vrfKeyHash;
+    uint32  public immutable vrfCallbackGasLimit;
+    uint16  public immutable vrfRequestConfirmations;
+    bool    public immutable vrfNativePayment;
+
     address[] public allPools;
     mapping(address => address[]) public poolsByCreator;
     mapping(address => bool) public isPool; // reverse lookup for off-chain trust checks
@@ -33,10 +49,27 @@ contract PotFactory {
         uint8 memberCount
     );
 
-    constructor(address _scoreContract, address _treasury) {
+    constructor(
+        address _scoreContract,
+        address _treasury,
+        address _vrfCoordinator,
+        bytes32 _vrfKeyHash,
+        uint32 _vrfCallbackGasLimit,
+        uint16 _vrfRequestConfirmations,
+        bool _vrfNativePayment
+    ) {
         require(_scoreContract != address(0) && _treasury != address(0), "Zero address");
+        require(_vrfCoordinator != address(0), "Zero VRF coordinator");
         scoreContract = PotScore(_scoreContract);
         protocolTreasury = _treasury;
+        vrfCoordinator = IVRFCoordinatorV2Plus(_vrfCoordinator);
+        vrfKeyHash = _vrfKeyHash;
+        vrfCallbackGasLimit = _vrfCallbackGasLimit;
+        vrfRequestConfirmations = _vrfRequestConfirmations;
+        vrfNativePayment = _vrfNativePayment;
+        // Create the shared subscription; the factory is its owner, which is what
+        // lets `createPool` authorize each new pool as a VRF consumer.
+        vrfSubId = IVRFCoordinatorV2Plus(_vrfCoordinator).createSubscription();
     }
 
     /// @notice Deploy a new savings circle.
@@ -70,12 +103,22 @@ contract PotFactory {
             isPublic,
             minScoreRequired,
             address(scoreContract),
-            protocolTreasury
+            protocolTreasury,
+            address(vrfCoordinator),
+            vrfKeyHash,
+            vrfSubId,
+            vrfCallbackGasLimit,
+            vrfRequestConfirmations,
+            vrfNativePayment
         );
 
         // Critical wiring: let this pool record reputation. Without this, every
         // score hook the pool fires would revert and the pool could never start.
         scoreContract.authorizePool(address(pool));
+
+        // VRF wiring: authorize this pool to draw from the factory's subscription.
+        // The factory is the subscription owner, so only it can add consumers.
+        vrfCoordinator.addConsumer(vrfSubId, address(pool));
 
         allPools.push(address(pool));
         poolsByCreator[msg.sender].push(address(pool));

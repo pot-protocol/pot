@@ -126,15 +126,36 @@ never reaches `maxMembers` is never stuck:
    because stake deposits aren't held on-chain yet; it lands with gaps #5/#6.)
 3. **Started early by the creator.** The creator can call `startEarly` at any
    point while `Forming` once **two or more** members are in, kicking off a
-   smaller circle without waiting for every seat. It calls `_start` verbatim, so
-   an early start is mechanically identical to a full-capacity start (same
-   shuffle, same round arming) and emits an extra `PoolStartedEarly` marker.
+   smaller circle without waiting for every seat. It calls `_requestRotation`
+   verbatim, so an early start is mechanically identical to a full-capacity start
+   (same VRF request, same two-phase lock) and emits an extra `PoolStartedEarly`
+   marker.
 
-**Locking rotation (`_start`).** The payout order is set by a Fisher-Yates
-shuffle and written to `rotationOrder`, which is then treated as immutable. Two
-arrays are deliberately kept separate:
+**Locking rotation (two-phase, Chainlink VRF v2.5).** Starting a pool is split
+into a request and a callback so the payout order is seeded by *verifiable*
+randomness the trigger transaction cannot influence:
 
-- `rotationOrder` — the payout schedule, never mutated after `_start`.
+1. **`_requestRotation`** (phase 1) — fired when the roster fills, or by the
+   creator via `startEarly`. It moves the pool to a new **`Pending`** state and
+   asks the VRF coordinator for one random word. It does **not** compute any
+   order. No member funds are held while `Pending` (`contribute` requires
+   `Active`), so a pool awaiting fulfillment has nothing at risk.
+2. **`fulfillRandomWords`** (phase 2, the VRF callback) — runs a Fisher-Yates
+   shuffle seeded by the random word, writes `rotationOrder`, arms round 0, and
+   flips the pool `Active`. It is request-scoped and idempotent: a callback for a
+   superseded (retried) request, or any callback once the pool has left
+   `Pending`, is ignored rather than reverted, so a late or stale fulfillment can
+   never re-roll an already-locked order. Only the coordinator can reach it
+   (`rawFulfillRandomWords` in `VRFConsumerBaseV2Plus`).
+
+If a request is never fulfilled (e.g. the subscription ran dry), anyone may call
+**`retryRotation`** after `RANDOMNESS_RETRY_WINDOW` to reissue it; the old
+request id is retired. The factory owns one VRF subscription and adds every pool
+it deploys as a consumer; fund it on the coordinator before pools start.
+
+After the order is locked, two arrays are deliberately kept separate:
+
+- `rotationOrder` — the payout schedule, never mutated after the VRF callback.
 - `members` — the *live* roster, from which ejections remove entries.
 
 Keeping them separate is what lets the contract eject a defaulter from `members`
@@ -142,10 +163,12 @@ while still walking the original payout schedule and correctly *skipping* the
 ejected wallet's turn. Conflating them would corrupt the schedule on the first
 ejection.
 
-> **Randomness caveat (audit target):** the shuffle seeds on
-> `block.timestamp` + `block.prevrandao`. `prevrandao` is influenceable by block
-> proposers and is **not** a secure VRF. Acceptable for v0.1 testnet pilots;
-> must be replaced with Chainlink VRF before mainnet. See *Known gaps*.
+> **Randomness (resolved):** the rotation seed comes from **Chainlink VRF v2.5**
+> (subscription method), delivered in a later block the start trigger cannot
+> influence. This replaced the original `block.timestamp` + `block.prevrandao`
+> shuffle, which the final joiner could simulate in-block and grind for an early
+> slot. The shuffle algorithm is unchanged; only its seed moved from a gameable
+> on-chain value to a verifiable off-chain one. See *Known gaps* row 2.
 
 **Contributing.** `contribute` requires the member to have pre-approved the pool
 for `contributionAmount` USDC. It records on-time vs. grace-period status
@@ -160,9 +183,13 @@ even if no insider acts. `_ejectMissers` removes every non-contributor from
 `members` (swap-and-pop, O(n)) and stamps a permanent miss on each one's score.
 
 **Payout (`_payout`).** It advances past any ejected recipient to find the next
-live member on the schedule, then splits the pot: 1% to the protocol treasury,
-the rest to the recipient. Critically, **all state is finalized before any USDC
-moves** (Checks-Effects-Interactions): score hooks fire, the round advances, and
+live member on the schedule, then releases the pot. `PROTOCOL_FEE_BPS` is **0** —
+the protocol takes nothing and the recipient receives the **full** pot ("put in
+$X, get back $X"). The fee is a parameterized constant with the treasury-transfer
+path already in place (guarded by `if (fee > 0)`), so a future non-zero fee is a
+one-line change, not a re-architecture. Critically, **all state is finalized
+before any USDC moves** (Checks-Effects-Interactions): score hooks fire, the
+round advances, and
 the pool's `state` flips to `Complete` if the schedule is exhausted — *then* the
 transfers execute. When the schedule isn't exhausted, the next round's deadline
 is armed.
@@ -245,17 +272,19 @@ are tracked as `testTODO_*` stubs in
 | # | Gap | Status | Severity |
 |---|-----|--------|----------|
 | 1 | **Pool authorization wiring.** Factory must authorize each new pool on `PotScore`, which requires the factory to own `PotScore`. | **Fixed** — `createPool` calls `authorizePool`; deploy script transfers ownership. | — |
-| 2 | **Weak rotation randomness.** `_start` seeds on `block.prevrandao`, which block proposers can bias. | **Open** — acceptable for v0.1 testnet; replace with Chainlink VRF before mainnet. | High (fairness) |
+| 2 | **Weak rotation randomness.** The original `_start` seeded the shuffle on `block.timestamp` + `block.prevrandao`, which the final joiner could simulate in-block and grind for an early slot. | **Resolved (this pass)** — replaced with Chainlink VRF v2.5: two-phase start (`_requestRotation` → `Pending` → `fulfillRandomWords` locks the order), permissionless `retryRotation` escape hatch, stale-callback no-op guard, factory-owned subscription. No funds are held while `Pending`. Verify coordinator/key-hash addresses against docs.chain.link before mainnet, and confirm the subscription is funded. | High (fairness) |
 | 3 | **Full-wipeout payout.** If every remaining member misses the same round, `_ejectMissers` empties `members` and the original `_payout` would index out of bounds / pay a ghost. | **Mitigated** — `_payout` now cancels the pool (`Cancelled`) when no live recipient exists; the eject loop's index-0 underflow is guarded. Refund accounting for the cancelled funds is still TODO (#5). | High |
 | 4 | **Reentrancy on `_payout`.** CEI ordering is in place and USDC is a known non-reentrant token, but this has not been formally audited, and a future non-USDC pool would reopen the surface. | **Open** — needs audit + a reentrant-token test. Consider adding OZ `ReentrancyGuard` defensively. | Medium |
 | 5 | **Disband / refund accounting.** Spec calls for returning *net* contributions (total in − total received) on early cancellation. Not implemented; cancelled pools currently strand their balance. | **Open** — needs design + reconciliation math + tests. | High |
 | 6 | **Stake deposit.** Spec calls for each member to lock one round's contribution at join, released at close, forfeited to remaining members if ejected post-payout. | **Open** — not yet on-chain. | Medium |
 | 7 | **On-chain pool discovery.** Beyond the factory's index there's no rich query layer; the frontend must index events (`PoolCreated`, `ContributionReceived`, `PotPaid`, `MemberEjected`). | **By design** — build an off-chain indexer. | Low |
 | 8 | **Hardcoded USDC address.** `PotPool` hardcodes Base mainnet USDC, which makes unit testing awkward (the test suite uses `vm.etch` to work around it). | **Open** — recommend taking the token address as a constructor arg so tests and other chains are first-class. | Low |
-| 9 | **Lobby / expiry mechanics.** A pool that never filled used to sit in `Forming` forever, stranding whoever joined early with no recourse. | **Added (this pass)** — `formingDeadline` (7-day `FORMING_WINDOW`) + permissionless `cancelIfExpired`, creator-only `startEarly` (2+ members, reuses `_start`), and a `claimRefund` stub guarded by `refundClaimed`. The refund **transfer** is still a stub (no stakes held on-chain yet) and lands with #5/#6. | — |
+| 9 | **Lobby / expiry mechanics.** A pool that never filled used to sit in `Forming` forever, stranding whoever joined early with no recourse. | **Added (this pass)** — `formingDeadline` (7-day `FORMING_WINDOW`) + permissionless `cancelIfExpired`, creator-only `startEarly` (2+ members, reuses `_requestRotation`), and a `claimRefund` stub guarded by `refundClaimed`. The refund **transfer** is still a stub (no stakes held on-chain yet) and lands with #5/#6. | — |
+| 10 | **Sybil / reputation farming.** A ring of colluding wallets can run fake circles among themselves — everyone "pays" on time — to cheaply farm high Pot Scores, then use that inflated reputation to enter or abuse public stranger pools. This attacks the reputation layer that is the protocol's entire trust thesis. | **Open** — needs anti-Sybil design: stake-at-risk per pool, counterparty-diversity weighting in `getScore`, per-cluster cost-to-fake, or a proof-of-personhood gate for public pools. Surfaced in user feedback 2026-06-24. | High |
+| 11 | **Rotation positional value (fairness beyond the draw).** Even with a perfectly fair VRF draw, the time value of money makes early slots genuinely worth more than late ones (months of forgone returns), so being "last" is a real economic loss. VRF fixes draw *integrity*, not positional *value*. | **Open (design)** — candidate mechanisms: a "never last two pools in a row" guarantee (`PotScore` already stores per-wallet history), or reputation-bidding for position (bid score, not cash). A *cash* auction for slots was considered and rejected — it reintroduces money/yield and the banking/compliance burden the 0%-fee design exists to avoid. Surfaced in user feedback 2026-06-24. | Medium (product) |
 
-**Do not deploy to mainnet until #2, #4, #5, and #6 are closed and the system
-has a third-party audit.**
+**Do not deploy to mainnet until #4, #5, #6, and #10 are closed and the system
+has a third-party audit.** (#2 weak randomness is now resolved via Chainlink VRF.)
 
 ---
 

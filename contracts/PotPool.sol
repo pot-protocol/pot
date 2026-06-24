@@ -2,6 +2,8 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
+import {VRFConsumerBaseV2Plus} from "@chainlink/contracts/src/v0.8/vrf/dev/VRFConsumerBaseV2Plus.sol";
+import {VRFV2PlusClient} from "@chainlink/contracts/src/v0.8/vrf/dev/libraries/VRFV2PlusClient.sol";
 import "./PotScore.sol";
 
 /// @title PotPool
@@ -16,7 +18,7 @@ import "./PotScore.sol";
 ///         can change the rotation order, skip a recipient, or withhold a
 ///         payout once the pool is Active. USDC moves only along the paths
 ///         encoded here.
-contract PotPool {
+contract PotPool is VRFConsumerBaseV2Plus {
     IERC20 public immutable usdc;
     PotScore public immutable scoreContract;
     address public immutable protocolTreasury;
@@ -29,12 +31,27 @@ contract PotPool {
     uint16 public immutable minScore;            // Pot Score gate for public pools
     uint256 public immutable formingDeadline;    // pool must fill (or be started) before this; else cancellable
 
+    // --- Chainlink VRF v2.5 config (passed in by the factory at deploy) ---
+    bytes32 public immutable vrfKeyHash;            // gas lane
+    uint256 public immutable vrfSubId;              // the factory's funded subscription
+    uint32  public immutable vrfCallbackGasLimit;   // must cover the shuffle + per-member score hook
+    uint16  public immutable vrfRequestConfirmations;
+    bool    public immutable vrfNativePayment;      // pay VRF in native (ETH) vs LINK
+
     uint16 public constant PROTOCOL_FEE_BPS = 0; // 0% — protocol takes nothing; you put in $X, you get back $X
     uint48 public constant GRACE_PERIOD = 48 hours;
     uint48 public constant FORMING_WINDOW = 7 days; // lobby lifetime before a stuck pool can be cancelled
+    uint48 public constant RANDOMNESS_RETRY_WINDOW = 1 days; // after this, a stuck VRF request can be reissued
 
-    enum PoolState { Forming, Active, Complete, Cancelled }
+    // `Pending` is appended (not inserted) so the existing numeric values of
+    // Forming/Active/Complete/Cancelled stay stable for any consumer reading
+    // `state()`. A pool sits in `Pending` only between "roster locked" and the
+    // VRF callback that locks the rotation order.
+    enum PoolState { Forming, Active, Complete, Cancelled, Pending }
     PoolState public state;
+
+    uint256 public vrfRequestId;          // current/last VRF request awaiting fulfillment
+    uint256 public randomnessRequestedAt; // when the pending request went out (retry clock)
 
     address[] public members;        // live roster (ejections remove entries)
     address[] public rotationOrder;  // payout order, locked at start, never mutated
@@ -47,6 +64,8 @@ contract PotPool {
     mapping(uint8 => mapping(address => bool)) public contributed;
 
     event MemberJoined(address indexed member);
+    event RotationRequested(uint256 indexed requestId);
+    event RotationRetried(uint256 indexed oldRequestId, uint256 indexed newRequestId);
     event PoolStarted(address[] rotationOrder);
     event ContributionReceived(address indexed member, uint8 round);
     event PotPaid(address indexed recipient, uint8 round, uint256 amount);
@@ -64,8 +83,14 @@ contract PotPool {
         bool _isPublic,
         uint16 _minScore,
         address _scoreContract,
-        address _treasury
-    ) {
+        address _treasury,
+        address _vrfCoordinator,
+        bytes32 _vrfKeyHash,
+        uint256 _vrfSubId,
+        uint32 _vrfCallbackGasLimit,
+        uint16 _vrfRequestConfirmations,
+        bool _vrfNativePayment
+    ) VRFConsumerBaseV2Plus(_vrfCoordinator) {
         creator = _creator;
         contributionAmount = _contributionAmount;
         intervalDays = _intervalDays;
@@ -74,6 +99,11 @@ contract PotPool {
         minScore = _minScore;
         scoreContract = PotScore(_scoreContract);
         protocolTreasury = _treasury;
+        vrfKeyHash = _vrfKeyHash;
+        vrfSubId = _vrfSubId;
+        vrfCallbackGasLimit = _vrfCallbackGasLimit;
+        vrfRequestConfirmations = _vrfRequestConfirmations;
+        vrfNativePayment = _vrfNativePayment;
         usdc = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913); // USDC on Base mainnet
         state = PoolState.Forming;
         formingDeadline = block.timestamp + FORMING_WINDOW;
@@ -104,7 +134,7 @@ contract PotPool {
         }
         _join(msg.sender);
         if (members.length == maxMembers) {
-            _start();
+            _requestRotation();
         }
     }
 
@@ -115,15 +145,56 @@ contract PotPool {
         emit MemberJoined(addr);
     }
 
-    /// @dev Lock the rotation order with a Fisher-Yates shuffle and arm round 0.
-    ///      v0.1 randomness source is block.prevrandao (see ARCHITECTURE.md
-    ///      "Known gaps": replace with Chainlink VRF before mainnet).
-    function _start() internal {
+    /// @dev Two-phase start, phase 1. Park the pool in `Pending` and ask
+    ///      Chainlink VRF for one verifiable random word. The rotation order is
+    ///      deliberately NOT computed here: under the old synchronous shuffle the
+    ///      transaction that triggered the start (the final joiner, or the
+    ///      creator via `startEarly`) could read `block.prevrandao` in-block,
+    ///      simulate the resulting order, and grind submissions until it landed
+    ///      an early slot. Sourcing the seed from VRF — delivered in a *later*
+    ///      block the trigger cannot influence — removes that grind. No member
+    ///      funds are held while `Pending` (`contribute` requires `Active`), so a
+    ///      pool awaiting fulfillment has nothing at risk.
+    function _requestRotation() internal {
+        state = PoolState.Pending;
+        randomnessRequestedAt = block.timestamp;
+        vrfRequestId = _sendRandomnessRequest();
+        emit RotationRequested(vrfRequestId);
+    }
+
+    /// @dev The single VRF request site, shared by the initial start and the
+    ///      stuck-request retry so the request parameters can never drift apart.
+    function _sendRandomnessRequest() private returns (uint256) {
+        return s_vrfCoordinator.requestRandomWords(
+            VRFV2PlusClient.RandomWordsRequest({
+                keyHash: vrfKeyHash,
+                subId: vrfSubId,
+                requestConfirmations: vrfRequestConfirmations,
+                callbackGasLimit: vrfCallbackGasLimit,
+                numWords: 1,
+                extraArgs: VRFV2PlusClient._argsToBytes(
+                    VRFV2PlusClient.ExtraArgsV1({nativePayment: vrfNativePayment})
+                )
+            })
+        );
+    }
+
+    /// @dev Two-phase start, phase 2 — the VRF callback. Locks the rotation
+    ///      order with a Fisher-Yates shuffle seeded by the verifiable random
+    ///      word, arms round 0, and flips the pool `Active`. Request-scoped and
+    ///      idempotent: a callback for a superseded (retried) request, or any
+    ///      callback once the pool is no longer `Pending`, is ignored rather than
+    ///      reverted — so a late or stale fulfillment can never re-roll an order
+    ///      that is already locked. `rawFulfillRandomWords` in the base contract
+    ///      guarantees only the VRF coordinator can reach this.
+    function fulfillRandomWords(uint256 requestId, uint256[] calldata randomWords) internal override {
+        if (state != PoolState.Pending || requestId != vrfRequestId) {
+            return;
+        }
+        uint256 seed = randomWords[0];
         rotationOrder = members;
         for (uint256 i = rotationOrder.length - 1; i > 0; i--) {
-            uint256 j = uint256(
-                keccak256(abi.encodePacked(block.timestamp, block.prevrandao, i))
-            ) % (i + 1);
+            uint256 j = uint256(keccak256(abi.encodePacked(seed, i))) % (i + 1);
             (rotationOrder[i], rotationOrder[j]) = (rotationOrder[j], rotationOrder[i]);
         }
         state = PoolState.Active;
@@ -133,17 +204,37 @@ contract PotPool {
         emit PoolStarted(rotationOrder);
     }
 
+    /// @notice Permissionless escape hatch for a VRF request that never gets
+    ///         fulfilled — e.g. the protocol's subscription ran out of LINK/native
+    ///         and the coordinator dropped the callback. After
+    ///         `RANDOMNESS_RETRY_WINDOW` anyone may reissue the request; it costs
+    ///         only a fresh VRF fee, and because no member funds are held while
+    ///         `Pending`, this can't be abused to move anyone's money. Retiring
+    ///         the old `vrfRequestId` makes its (now stale) callback a no-op.
+    function retryRotation() external {
+        require(state == PoolState.Pending, "Not pending");
+        require(
+            block.timestamp >= randomnessRequestedAt + RANDOMNESS_RETRY_WINDOW,
+            "Retry too soon"
+        );
+        uint256 oldId = vrfRequestId;
+        randomnessRequestedAt = block.timestamp;
+        vrfRequestId = _sendRandomnessRequest();
+        emit RotationRetried(oldId, vrfRequestId);
+    }
+
     /// @notice Creator kicks off an under-filled pool without waiting for every
     ///         seat. Only valid while `Forming` and only once at least two
     ///         members are in, so the smallest viable circle (a pair) can run.
-    ///         Reuses `_start` verbatim — same shuffle, same round arming — so
-    ///         an early start and a full-capacity start are mechanically identical.
+    ///         Reuses `_requestRotation` verbatim — same VRF request, same
+    ///         two-phase lock — so an early start and a full-capacity start are
+    ///         mechanically identical, randomness path included.
     function startEarly() external {
         require(msg.sender == creator, "Only creator");
         require(state == PoolState.Forming, "Not forming");
         require(members.length >= 2, "Need 2+ members");
         emit PoolStartedEarly(uint8(members.length));
-        _start();
+        _requestRotation();
     }
 
     /// @notice Permissionless escape hatch for a pool that never filled. Once the

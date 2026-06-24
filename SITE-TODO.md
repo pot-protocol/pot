@@ -4,6 +4,16 @@ This is the punch list for graduating from the GitHub Pages pilot to a real prod
 
 ---
 
+## Copy / Messaging (from user feedback 2026-06-24)
+
+Raised in a feedback DM thread with a first reader. See memory `project_pot.md` for the full triage.
+
+- [ ] **Fix the Home-tier calculator/ladder inconsistency (concrete bug, live).** The page mixes "10 people / 10 months / $10,000" with "12 months / $12,000" at $1,000/mo (e.g. index.html ~line 1242 pairs "10 people" with "12 month"). The contract caps pools at **10 members** (`memberCount <= 10`), so a $12,000 Home tier at $1,000/mo — which needs 12 rounds = 12 people — is **impossible under the protocol**, not just inconsistent copy. Pick one: $10,000 / 10 months at $1,000/mo, or $1,200/mo × 10 = $12,000.
+- [ ] **Lead the FAQ with the "why not just save the money myself?" objection.** Every susu faces it. Answer: forced savings via social commitment + early access to your cut without a loan.
+- [ ] **Reframe positioning toward the real target user.** Consider leading with the accessible Seed ($250) tier rather than $1,000+ Home; make explicit this is for non-savers building the habit and for social lending (help cousin Becky without *giving* her money) — *not* for savvy investors who'd rather index. Be honest that early slots are worth more than late ones (time value) — see ARCHITECTURE.md gap #11.
+
+---
+
 ## Domain / Hosting
 
 - [ ] Move from GitHub Pages to CF Pages or a real server (needed for custom HTTP headers)
@@ -84,7 +94,7 @@ GitHub Pages can't set these. Requires CF Pages, CF Worker, or nginx in front.
 These are hard blockers — nothing goes to mainnet without them:
 
 - [ ] Code4rena or equivalent audit of all three contracts
-- [ ] Chainlink VRF replacing `block.prevrandao` for rotation randomness
+- [x] Chainlink VRF replacing `block.prevrandao` for rotation randomness — **DONE 2026-06-24** (VRF v2.5, two-phase start; see ARCHITECTURE.md gap #2). Ops blocker remains: fund the factory's VRF subscription before launch.
 - [ ] Disband/refund accounting implemented in PotPool
 - [ ] Stake deposit mechanism implemented
 - [ ] Treasury wallet address locked in (passed to PotFactory constructor at deploy)

@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
+import {VRFCoordinatorV2_5Mock} from "@chainlink/contracts/src/v0.8/vrf/mocks/VRFCoordinatorV2_5Mock.sol";
 import "../contracts/PotScore.sol";
 import "../contracts/PotFactory.sol";
 import "../contracts/PotPool.sol";
@@ -15,24 +16,32 @@ contract MockUSDC is ERC20 {
 }
 
 /// @title PotPool test suite
-/// @notice Exercises the full lifecycle of a Pot circle. The happy-path tests
-///         below are real and should pass against the contracts as written.
-///         The `testTODO_*` functions are intentional stubs that name the edge
-///         cases an audit must cover before mainnet — each maps to an item in
-///         ARCHITECTURE.md "Known gaps / audit targets".
+/// @notice Exercises the full lifecycle of a Pot circle. Since the
+///         block.prevrandao shuffle was replaced with Chainlink VRF, starting a
+///         pool is a two-phase operation: filling the roster only *requests*
+///         randomness (state -> Pending); the rotation order is locked when the
+///         VRF coordinator calls back (state -> Active). Tests drive that
+///         callback with VRFCoordinatorV2_5Mock.
 ///
 /// @dev    IMPORTANT TEST-HARNESS NOTE: PotPool hardcodes the Base mainnet USDC
-///         address in its constructor. To test against MockUSDC you must either
-///         (a) `vm.etch` the mock's runtime bytecode at that address, or
-///         (b) refactor PotPool to take the USDC address as a constructor arg
-///         (recommended — see ARCHITECTURE.md). The setUp below uses approach
-///         (a) so the suite runs without modifying the contract.
+///         address in its constructor. To test against MockUSDC we `vm.etch` the
+///         mock's runtime bytecode at that address (approach (a) — the suite runs
+///         without modifying the contract; the constructor-arg refactor is still
+///         the recommended production fix, see ARCHITECTURE.md).
 contract PotPoolTest is Test {
     address constant BASE_USDC = 0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913;
+
+    // VRF mock config — values are arbitrary for the mock; the key hash is only
+    // a label here, and the subscription is funded far beyond any test's needs.
+    bytes32 constant KEY_HASH = keccak256("test-gas-lane");
+    uint32  constant CB_GAS_LIMIT = 1_500_000;
+    uint16  constant REQ_CONFIRMATIONS = 3;
+    bool    constant NATIVE_PAYMENT = false; // LINK, so the mock's fundSubscription applies
 
     MockUSDC usdc;
     PotScore score;
     PotFactory factory;
+    VRFCoordinatorV2_5Mock vrf;
 
     address treasury = address(0xFEE);
     address alice = address(0xA11CE);
@@ -47,10 +56,25 @@ contract PotPoolTest is Test {
         vm.etch(BASE_USDC, address(mock).code);
         usdc = MockUSDC(BASE_USDC);
 
+        // VRF v2.5 mock: (baseFee, gasPrice, weiPerUnitLink).
+        vrf = new VRFCoordinatorV2_5Mock(1e17, 1e9, 4e15);
+
         score = new PotScore();
-        factory = new PotFactory(address(score), treasury);
+        factory = new PotFactory(
+            address(score),
+            treasury,
+            address(vrf),
+            KEY_HASH,
+            CB_GAS_LIMIT,
+            REQ_CONFIRMATIONS,
+            NATIVE_PAYMENT
+        );
         // Factory must own the score registry to authorize pools (deploy invariant).
         score.transferOwnership(address(factory));
+
+        // The factory created its subscription in its constructor; fund it so
+        // pools' randomness requests can be fulfilled.
+        vrf.fundSubscription(factory.vrfSubId(), 100 ether);
 
         // Fund participants.
         usdc.mint(alice, 1_000e6);
@@ -94,8 +118,11 @@ contract PotPoolTest is Test {
         pool.invite(bob);
 
         vm.prank(bob);
-        pool.join(); // fills the 2-person pool and auto-starts
+        pool.join(); // fills the 2-person pool and REQUESTS randomness
 
+        // VRF is async: the pool parks in Pending until the coordinator calls back.
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending));
+        _fulfill(pool);
         assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
     }
 
@@ -108,6 +135,97 @@ contract PotPoolTest is Test {
         // Both members now hold a soulbound Pot Score token.
         assertGt(score.tokenOf(alice), 0);
         assertGt(score.tokenOf(bob), 0);
+    }
+
+    // ------------------------------------------------------------------
+    // VRF randomness (replaces the old block.prevrandao shuffle)
+    // ------------------------------------------------------------------
+
+    /// Filling the roster must NOT lock an order or move to Active by itself — it
+    /// only requests randomness. No funds can enter while Pending.
+    function test_FillRequestsRandomness_NoOrderUntilFulfilled() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        vm.prank(alice);
+        pool.invite(bob);
+        vm.prank(bob);
+        pool.join(); // fills -> requests randomness
+
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending), "must be Pending");
+        assertGt(pool.vrfRequestId(), 0, "a VRF request must be open");
+        assertEq(pool.getRotationOrder().length, 0, "order must not be locked yet");
+
+        // Funds cannot enter a pool that has not started.
+        vm.startPrank(alice);
+        usdc.approve(address(pool), CONTRIB);
+        vm.expectRevert(bytes("Not active"));
+        pool.contribute();
+        vm.stopPrank();
+
+        // The callback locks a full, valid rotation order and flips Active.
+        _fulfill(pool);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
+        address[] memory order = pool.getRotationOrder();
+        assertEq(order.length, 2);
+        assertTrue(_isPermutationOf2(order, alice, bob), "order must be a permutation of members");
+    }
+
+    /// Only the VRF coordinator may deliver randomness. A spoofed fulfillment
+    /// from any other address must revert — otherwise anyone could pick the order.
+    function test_FulfillRandomWords_RejectsNonCoordinator() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        vm.prank(alice);
+        pool.invite(bob);
+        vm.prank(bob);
+        pool.join();
+
+        // Read the request id BEFORE arming expectRevert — otherwise this view
+        // call would be the "next call" the cheatcode watches.
+        uint256 reqId = pool.vrfRequestId();
+        uint256[] memory words = new uint256[](1);
+        words[0] = 42;
+        vm.prank(address(0xBAD));
+        vm.expectRevert(); // OnlyCoordinatorCanFulfill
+        pool.rawFulfillRandomWords(reqId, words);
+
+        // Still Pending, nothing locked.
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending));
+    }
+
+    /// A stuck request (subscription dry, callback dropped) can be reissued after
+    /// the retry window. The old request is retired so its stale callback no-ops;
+    /// only the new request can activate the pool.
+    function test_RetryRotation_ReissuesAfterWindowAndStaleCallbackNoOps() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
+        vm.prank(alice);
+        pool.invite(bob);
+        vm.prank(bob);
+        pool.join();
+
+        uint256 firstId = pool.vrfRequestId();
+
+        // Too soon to retry.
+        vm.expectRevert(bytes("Retry too soon"));
+        pool.retryRotation();
+
+        // After the window, anyone may reissue.
+        vm.warp(block.timestamp + pool.RANDOMNESS_RETRY_WINDOW());
+        pool.retryRotation();
+        uint256 secondId = pool.vrfRequestId();
+        assertTrue(secondId != firstId, "retry must issue a fresh request id");
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending));
+
+        // A late callback for the SUPERSEDED request is ignored.
+        uint256[] memory words = new uint256[](1);
+        words[0] = 7;
+        vrf.fulfillRandomWordsWithOverride(firstId, address(pool), words);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending), "stale callback must no-op");
+
+        // The current request activates the pool.
+        vrf.fulfillRandomWordsWithOverride(secondId, address(pool), words);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Active));
     }
 
     // ------------------------------------------------------------------
@@ -134,15 +252,30 @@ contract PotPoolTest is Test {
         assertEq(bobPools, 1);
     }
 
-    function test_ProtocolFee_IsOnePercentOfPot() public {
+    function test_ProtocolFee_IsZero_FullPotToRecipient() public {
         PotPool pool = _form2(alice, bob);
 
+        // rotationOrder[0] is the round-0 recipient; capture their balance.
+        address[] memory order = pool.getRotationOrder();
+        address recipient = order[0];
         uint256 treasuryBefore = usdc.balanceOf(treasury);
+        uint256 recipientBefore = usdc.balanceOf(recipient);
+
         _contribute(pool, alice);
         _contribute(pool, bob); // settles round 0, pot = 2 * $100 = $200
 
-        uint256 feeTaken = usdc.balanceOf(treasury) - treasuryBefore;
-        assertEq(feeTaken, (CONTRIB * 2 * 100) / 10_000); // 1% of $200 = $2
+        // PROTOCOL_FEE_BPS == 0: the treasury receives nothing and the pool
+        // retains nothing — the entire pot is disbursed. ("Put in $X, get back
+        // $X.") The recipient's own balance nets out the $100 they paid in this
+        // round, so the recipient delta is pot - own-stake; the zero-fee invariant
+        // is proved by the treasury delta and the emptied pool balance.
+        assertEq(usdc.balanceOf(treasury) - treasuryBefore, 0, "protocol takes nothing");
+        assertEq(usdc.balanceOf(address(pool)), 0, "full pot disbursed, no fee retained");
+        assertEq(
+            usdc.balanceOf(recipient) - recipientBefore,
+            CONTRIB * 2 - CONTRIB,
+            "recipient nets the pot minus their own stake"
+        );
     }
 
     function test_OnTimeContribution_BuildsStreak() public {
@@ -179,7 +312,7 @@ contract PotPoolTest is Test {
     // ------------------------------------------------------------------
 
     function test_Score_IsSoulbound() public {
-        PotPool pool = _form2(alice, bob);
+        _form2(alice, bob); // mints soulbound tokens for both members
         uint256 aliceToken = score.tokenOf(alice);
 
         vm.prank(alice);
@@ -208,13 +341,6 @@ contract PotPoolTest is Test {
     /// rather than revert or pay a ghost. Assert state == Cancelled and no
     /// USDC is sent to a non-member.
     function testTODO_AllMembersMiss_CancelsCleanly() public {
-        vm.skip(true);
-    }
-
-    /// Gap: weak randomness. `_start` uses block.prevrandao. A validator/builder
-    /// can bias rotation order. This test should document the bias surface and
-    /// will be replaced by a Chainlink VRF integration test before mainnet.
-    function testTODO_RotationRandomness_VRF() public {
         vm.skip(true);
     }
 
@@ -252,9 +378,8 @@ contract PotPoolTest is Test {
     /// Gap: early start. The creator may launch an under-filled pool with
     /// `startEarly` once 2+ members are in. Assert: non-creators are rejected,
     /// a single-member pool is rejected, it only works while `Forming`, and a
-    /// successful call moves the pool to `Active` with a locked rotation order
-    /// (mechanically identical to a full-capacity `_start`) plus a
-    /// `PoolStartedEarly` event.
+    /// successful call moves the pool to `Pending` (then `Active` once VRF calls
+    /// back) with a locked rotation order, plus a `PoolStartedEarly` event.
     function testTODO_startEarly() public {
         vm.skip(true);
     }
@@ -272,13 +397,28 @@ contract PotPoolTest is Test {
     // Helpers
     // ------------------------------------------------------------------
 
+    /// @dev Deliver VRF randomness for a pool sitting in Pending, locking its
+    ///      rotation order and flipping it Active (mirrors the coordinator).
+    function _fulfill(PotPool pool) internal {
+        uint256 reqId = pool.vrfRequestId();
+        uint256[] memory words = new uint256[](1);
+        words[0] = uint256(keccak256(abi.encode(reqId, block.timestamp)));
+        vrf.fulfillRandomWordsWithOverride(reqId, address(pool), words);
+    }
+
+    function _isPermutationOf2(address[] memory order, address a, address b) internal pure returns (bool) {
+        if (order.length != 2) return false;
+        return (order[0] == a && order[1] == b) || (order[0] == b && order[1] == a);
+    }
+
     function _form2(address a, address b) internal returns (PotPool pool) {
         vm.prank(a);
         pool = PotPool(factory.createPool(CONTRIB, 7, 2, false, 0));
         vm.prank(a);
         pool.invite(b);
         vm.prank(b);
-        pool.join(); // auto-starts at capacity
+        pool.join(); // fills at capacity -> requests randomness
+        _fulfill(pool); // deliver VRF -> Active
     }
 
     function _form3(address a, address b, address c) internal returns (PotPool pool) {
@@ -291,7 +431,8 @@ contract PotPoolTest is Test {
         vm.prank(b);
         pool.join();
         vm.prank(c);
-        pool.join(); // auto-starts at capacity
+        pool.join(); // fills at capacity -> requests randomness
+        _fulfill(pool); // deliver VRF -> Active
     }
 
     function _contribute(PotPool pool, address who) internal {
