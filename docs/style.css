@@ -960,6 +960,139 @@ a { color: inherit; }
   text-align: center;
 }
 
+/* ---------- Social sharing ---------- */
+/* A share host is positioned so its fallback popover can anchor above the
+   trigger. The native Web Share sheet (mobile) needs none of this. */
+[data-share] { position: relative; }
+
+.share__icon { flex: none; }
+
+/* Hero: a quiet, link-weight share affordance under the CTAs. */
+.share--hero {
+  display: inline-flex;
+  margin: 0 0 1.4rem;
+}
+.share__trigger--link {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.45rem;
+  font-family: "Inter", sans-serif;
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--ink-soft);
+  background: transparent;
+  border: none;
+  padding: 0.25rem 0;
+  cursor: pointer;
+  transition: color 0.15s ease;
+}
+.share__trigger--link:hover { color: var(--terracotta-deep); }
+.share--hero { justify-content: center; }
+@media (min-width: 901px) {
+  .share--hero { justify-content: flex-start; }
+}
+
+/* Share prompts after the ladder and waitlist. */
+.sharebar {
+  max-width: 920px;
+  margin: clamp(2rem, 4vw, 2.8rem) auto 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  gap: 0.6rem 1.1rem;
+  text-align: center;
+}
+.sharebar__prompt {
+  margin: 0;
+  font-family: "Playfair Display", serif;
+  font-style: italic;
+  font-size: clamp(1.05rem, 2.2vw, 1.25rem);
+  color: var(--terracotta-deep);
+}
+.sharebar--join {
+  margin-top: clamp(2.4rem, 5vw, 3.2rem);
+  flex-direction: column;
+  gap: 0.8rem;
+}
+
+/* Calculator result share. */
+.calc__share {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 0.6rem 1rem;
+  margin-top: 1.3rem;
+  padding-top: 1.3rem;
+  border-top: 1px solid var(--line);
+}
+.calc__sharelabel {
+  font-size: 0.9rem;
+  font-weight: 600;
+  color: var(--ink-soft);
+}
+
+/* Fallback popover: small, anchored above the trigger, subtle. */
+.share__pop {
+  position: absolute;
+  bottom: calc(100% + 0.6rem);
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  min-width: 11.5rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  padding: 0.45rem;
+  background: var(--cream);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  box-shadow: var(--shadow);
+  animation: sharePopIn 0.16s ease;
+}
+/* little pointer toward the trigger */
+.share__pop::after {
+  content: "";
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  border: 7px solid transparent;
+  border-top-color: var(--cream);
+  filter: drop-shadow(0 1px 0 var(--line));
+}
+@keyframes sharePopIn {
+  from { opacity: 0; transform: translateX(-50%) translateY(4px); }
+  to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+}
+.share__opt {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+  width: 100%;
+  font-family: "Inter", sans-serif;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--ink);
+  text-decoration: none;
+  text-align: left;
+  background: transparent;
+  border: none;
+  border-radius: 9px;
+  padding: 0.55rem 0.7rem;
+  cursor: pointer;
+  transition: background 0.14s ease, color 0.14s ease;
+}
+.share__opt svg { flex: none; color: var(--ink-soft); transition: color 0.14s ease; }
+.share__opt:hover { background: var(--bg-warm); }
+.share__opt:hover svg { color: var(--terracotta-deep); }
+.share__opt--copy.is-copied {
+  color: var(--terracotta-deep);
+  background: rgba(194, 113, 79, 0.10);
+}
+.share__opt--copy.is-copied svg { color: var(--terracotta-deep); }
+
 /* ---------- Scroll reveal ---------- */
 .reveal--armed {
   opacity: 0;
@@ -1026,4 +1159,5 @@ a { color: inherit; }
   html { scroll-behavior: auto; }
   .reveal--armed { opacity: 1; transform: none; transition: none; }
   .btn:hover { transform: none; }
+  .share__pop { animation: none; }
 }
