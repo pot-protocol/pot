@@ -27,9 +27,11 @@ contract PotPool {
     uint8 public immutable maxMembers;           // 2–10
     bool public immutable isPublic;              // open to stranger pools vs invite-only
     uint16 public immutable minScore;            // Pot Score gate for public pools
+    uint256 public immutable formingDeadline;    // pool must fill (or be started) before this; else cancellable
 
     uint16 public constant PROTOCOL_FEE_BPS = 100; // 1%
     uint48 public constant GRACE_PERIOD = 48 hours;
+    uint48 public constant FORMING_WINDOW = 7 days; // lobby lifetime before a stuck pool can be cancelled
 
     enum PoolState { Forming, Active, Complete, Cancelled }
     PoolState public state;
@@ -38,6 +40,7 @@ contract PotPool {
     address[] public rotationOrder;  // payout order, locked at start, never mutated
     mapping(address => bool) public isMember;
     mapping(address => bool) public hasInvite;
+    mapping(address => bool) public refundClaimed; // guards against double refunds after a cancellation
 
     uint8 public currentRound;
     uint256 public roundDeadline;
@@ -49,6 +52,9 @@ contract PotPool {
     event PotPaid(address indexed recipient, uint8 round, uint256 amount);
     event MemberEjected(address indexed member, uint8 round);
     event PoolComplete();
+    event PoolStartedEarly(uint8 memberCount);
+    event PoolCancelled();
+    event RefundClaimed(address indexed member);
 
     constructor(
         address _creator,
@@ -70,6 +76,7 @@ contract PotPool {
         protocolTreasury = _treasury;
         usdc = IERC20(0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913); // USDC on Base mainnet
         state = PoolState.Forming;
+        formingDeadline = block.timestamp + FORMING_WINDOW;
         _join(_creator);
     }
 
@@ -124,6 +131,53 @@ contract PotPool {
         roundDeadline = block.timestamp + (uint256(intervalDays) * 1 days);
         scoreContract.onPoolStarted(members);
         emit PoolStarted(rotationOrder);
+    }
+
+    /// @notice Creator kicks off an under-filled pool without waiting for every
+    ///         seat. Only valid while `Forming` and only once at least two
+    ///         members are in, so the smallest viable circle (a pair) can run.
+    ///         Reuses `_start` verbatim — same shuffle, same round arming — so
+    ///         an early start and a full-capacity start are mechanically identical.
+    function startEarly() external {
+        require(msg.sender == creator, "Only creator");
+        require(state == PoolState.Forming, "Not forming");
+        require(members.length >= 2, "Need 2+ members");
+        emit PoolStartedEarly(uint8(members.length));
+        _start();
+    }
+
+    /// @notice Permissionless escape hatch for a pool that never filled. Once the
+    ///         forming window has elapsed with the roster still incomplete,
+    ///         anyone may cancel it so members aren't stranded in `Forming`
+    ///         forever. Flips state to `Cancelled`; members then call
+    ///         `claimRefund` to recover any stake.
+    /// @dev    CEI: the only state change (`state`) is written before the event;
+    ///         there are no external calls here, so there is no reentrancy
+    ///         surface to guard.
+    function cancelIfExpired() external {
+        require(state == PoolState.Forming, "Not forming");
+        require(block.timestamp >= formingDeadline, "Not expired");
+        state = PoolState.Cancelled;
+        emit PoolCancelled();
+    }
+
+    /// @notice After a pool is `Cancelled`, a member reclaims their stake deposit.
+    /// @dev    Stake deposits are a v1 feature (see ARCHITECTURE.md "Known gaps":
+    ///         stake deposit / disband refund accounting) and are not yet held
+    ///         on-chain, so there is nothing to transfer today — this is a stub
+    ///         that records the claim and emits `RefundClaimed`. The
+    ///         `refundClaimed` guard and the CEI ordering are written now so the
+    ///         transfer can be dropped in later without re-architecting: the
+    ///         effect (marking the claim) already precedes the (future) interaction.
+    function claimRefund() external {
+        require(state == PoolState.Cancelled, "Not cancelled");
+        require(isMember[msg.sender], "Not a member");
+        require(!refundClaimed[msg.sender], "Already refunded");
+
+        // Checks-Effects-Interactions: set the guard before any (future) transfer.
+        refundClaimed[msg.sender] = true;
+        // Stake-deposit refund transfer goes here once stakes are held on-chain (v1).
+        emit RefundClaimed(msg.sender);
     }
 
     // ---------------------------------------------------------------------

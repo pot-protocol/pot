@@ -240,6 +240,34 @@ contract PotPoolTest is Test {
         vm.skip(true);
     }
 
+    /// Gap: lobby expiry. A pool that never fills must not strand its members in
+    /// `Forming` forever. After `formingDeadline` (7-day FORMING_WINDOW) anyone
+    /// may call `cancelIfExpired`; assert it reverts before the deadline, reverts
+    /// once the pool has left `Forming`, and otherwise flips state to `Cancelled`
+    /// and emits `PoolCancelled`.
+    function testTODO_cancelIfExpired() public {
+        vm.skip(true);
+    }
+
+    /// Gap: early start. The creator may launch an under-filled pool with
+    /// `startEarly` once 2+ members are in. Assert: non-creators are rejected,
+    /// a single-member pool is rejected, it only works while `Forming`, and a
+    /// successful call moves the pool to `Active` with a locked rotation order
+    /// (mechanically identical to a full-capacity `_start`) plus a
+    /// `PoolStartedEarly` event.
+    function testTODO_startEarly() public {
+        vm.skip(true);
+    }
+
+    /// Gap: refund on cancel. After `cancelIfExpired`, a member calls
+    /// `claimRefund`; assert it reverts unless `Cancelled`, reverts for
+    /// non-members, emits `RefundClaimed`, and the `refundClaimed` guard blocks a
+    /// second claim. Extend to assert the staked USDC is returned once stake
+    /// deposits are held on-chain (ties to testTODO_StakeDeposit_*).
+    function testTODO_claimRefund() public {
+        vm.skip(true);
+    }
+
     // ------------------------------------------------------------------
     // Helpers
     // ------------------------------------------------------------------

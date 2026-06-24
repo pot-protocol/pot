@@ -112,6 +112,24 @@ an invite mapping; public pools gate on Pot Score. The pool **auto-starts the
 instant the roster hits `maxMembers`** — there's no separate "start"
 transaction a creator could forget or grief by withholding.
 
+`Forming` is not a single dead-end state — it has three exits, so a pool that
+never reaches `maxMembers` is never stuck:
+
+1. **Filling** — the normal path: members keep joining until the roster is full
+   and the pool auto-starts into `Active`.
+2. **Expired → Cancelled (with refund).** A `formingDeadline` is fixed at
+   construction (`block.timestamp + FORMING_WINDOW`, 7 days). Once it passes with
+   the roster still incomplete, **anyone** may call `cancelIfExpired` (it's
+   permissionless on purpose, like `settle`) to flip the pool to `Cancelled`.
+   Members then call `claimRefund` — guarded by a `refundClaimed` mapping against
+   double-claims — to recover their stake. (The refund *transfer* is a stub today
+   because stake deposits aren't held on-chain yet; it lands with gaps #5/#6.)
+3. **Started early by the creator.** The creator can call `startEarly` at any
+   point while `Forming` once **two or more** members are in, kicking off a
+   smaller circle without waiting for every seat. It calls `_start` verbatim, so
+   an early start is mechanically identical to a full-capacity start (same
+   shuffle, same round arming) and emits an extra `PoolStartedEarly` marker.
+
 **Locking rotation (`_start`).** The payout order is set by a Fisher-Yates
 shuffle and written to `rotationOrder`, which is then treated as immutable. Two
 arrays are deliberately kept separate:
@@ -234,6 +252,7 @@ are tracked as `testTODO_*` stubs in
 | 6 | **Stake deposit.** Spec calls for each member to lock one round's contribution at join, released at close, forfeited to remaining members if ejected post-payout. | **Open** — not yet on-chain. | Medium |
 | 7 | **On-chain pool discovery.** Beyond the factory's index there's no rich query layer; the frontend must index events (`PoolCreated`, `ContributionReceived`, `PotPaid`, `MemberEjected`). | **By design** — build an off-chain indexer. | Low |
 | 8 | **Hardcoded USDC address.** `PotPool` hardcodes Base mainnet USDC, which makes unit testing awkward (the test suite uses `vm.etch` to work around it). | **Open** — recommend taking the token address as a constructor arg so tests and other chains are first-class. | Low |
+| 9 | **Lobby / expiry mechanics.** A pool that never filled used to sit in `Forming` forever, stranding whoever joined early with no recourse. | **Added (this pass)** — `formingDeadline` (7-day `FORMING_WINDOW`) + permissionless `cancelIfExpired`, creator-only `startEarly` (2+ members, reuses `_start`), and a `claimRefund` stub guarded by `refundClaimed`. The refund **transfer** is still a stub (no stakes held on-chain yet) and lands with #5/#6. | — |
 
 **Do not deploy to mainnet until #2, #4, #5, and #6 are closed and the system
 has a third-party audit.**
