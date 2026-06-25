@@ -61,6 +61,7 @@ contract PotPoolTest is Test {
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
     address carol = address(0xCAC0);
+    address dave = address(0xDA7E);
 
     uint256 constant CONTRIB = 100e6; // $100
 
@@ -94,6 +95,7 @@ contract PotPoolTest is Test {
         usdc.mint(alice, 1_000e6);
         usdc.mint(bob, 1_000e6);
         usdc.mint(carol, 1_000e6);
+        usdc.mint(dave, 1_000e6);
     }
 
     // ------------------------------------------------------------------
@@ -443,19 +445,27 @@ contract PotPoolTest is Test {
     // Stake-at-risk (PUBLIC pools) — v1.1 (#10)
     // ------------------------------------------------------------------
 
-    /// A public pool can't start until the roster is full AND every member has
-    /// staked — including the creator (who staked separately, post-construction).
-    function test_PublicPool_StartGatesOnAllStaked() public {
+    /// A public pool gates on the creator staking FIRST (so a non-staking creator
+    /// can't trap joiners' capital), then starts when the roster fills with
+    /// everyone staked.
+    function test_PublicPool_StartGatesOnStakes() public {
         vm.prank(alice);
         PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, true, 0, false));
 
-        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
-        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Forming), "full but creator unstaked -> not started");
-        assertEq(pool.stakedCount(), 1);
-        assertTrue(pool.staked(bob));
+        // bob can't join until the creator has staked
+        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB);
+        vm.expectRevert(bytes("Creator must stake first"));
+        pool.join();
+        vm.stopPrank();
 
+        // creator stakes -> still Forming (only 1 of 2 seats)
         vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
-        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending), "all staked + full -> VRF requested");
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Forming));
+        assertEq(pool.stakedCount(), 1);
+
+        // bob joins (auto-stakes) -> full + all staked -> VRF requested
+        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending), "full + all staked -> VRF requested");
         assertEq(usdc.balanceOf(address(pool)), CONTRIB * 2, "both stakes held");
 
         _fulfill(pool);
@@ -516,6 +526,26 @@ contract PotPoolTest is Test {
         assertEq(usdc.balanceOf(address(pool)), 0, "all three stakes resolved");
     }
 
+    /// Slash split among 3 survivors (100e6 / 3 = 33333333 r1): the remainder is
+    /// swept by the first claimant so the pool empties to EXACTLY 0 — no dust stranded.
+    function test_SlashDust_FullyDistributed() public {
+        address[] memory who = new address[](4);
+        who[0] = alice; who[1] = bob; who[2] = carol; who[3] = dave;
+        PotPool pool = _formPublicStaked(who);
+        address defaulter = pool.getRotationOrder()[0]; // first-slot default -> pool still completes, 3 survive
+
+        for (uint256 i = 0; i < 4; i++) if (who[i] != defaulter) _contribute(pool, who[i]);
+        vm.warp(block.timestamp + 7 days + 48 hours + 1);
+        pool.settle();
+        assertEq(pool.totalSlashed(), CONTRIB, "one stake slashed");
+
+        _driveToComplete(pool);
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Complete));
+
+        for (uint256 i = 0; i < 4; i++) if (who[i] != defaulter) { vm.prank(who[i]); pool.claimRefund(); }
+        assertEq(usdc.balanceOf(address(pool)), 0, "slash fully distributed, no dust stranded");
+    }
+
     /// Return the two members of `who` (length 3) that are not `excluded`.
     function _otherTwo(address[] memory who, address excluded) internal pure returns (address a, address b) {
         address[] memory rest = new address[](2);
@@ -530,8 +560,8 @@ contract PotPoolTest is Test {
     function test_PublicPool_StakeRefundedOnFormingCancel() public {
         vm.prank(alice);
         PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 3, true, 0, false)); // 3 seats, won't fill
-        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
         vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
         assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Forming), "never filled");
 
         vm.warp(block.timestamp + 7 days + 1);
@@ -549,8 +579,8 @@ contract PotPoolTest is Test {
     function test_PublicPool_StuckInPending_CancelRefundsStakes() public {
         vm.prank(alice);
         PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, true, 0, false));
-        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
         vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        vm.startPrank(bob); usdc.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
         assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending), "VRF requested, not fulfilled");
         assertEq(usdc.balanceOf(address(pool)), CONTRIB * 2, "stakes held during Pending");
 
@@ -570,6 +600,46 @@ contract PotPoolTest is Test {
         PotPool pool = _form2(alice, bob);
         assertEq(pool.stakedCount(), 0, "private pools never stake");
         assertFalse(pool.staked(alice));
+    }
+
+    /// REGRESSION (the red-team Critical): when ≥2 *trailing* recipients default,
+    /// the skip loop advances `currentRound` past the round the survivors paid
+    /// into. Before the fix, `claimRefund` keyed off the advanced `currentRound`
+    /// and stranded those contributions ("Nothing to claim"). The fix records
+    /// `cancelledRound` (the pre-skip round) so survivors recover them.
+    function test_TrailingDefaults_NoStranding() public {
+        // private FIXED 4-member pool; join order = rotation order [alice,bob,carol,dave]
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 4, false, 0, true));
+        vm.startPrank(alice); pool.invite(bob); pool.invite(carol); pool.invite(dave); vm.stopPrank();
+        vm.prank(bob);   pool.join();
+        vm.prank(carol); pool.join();
+        vm.prank(dave);  pool.join();
+        vm.prank(alice); pool.startEarly(); // FIXED -> instant Active
+
+        // R0 -> alice paid; R1 -> bob paid (everyone contributes both rounds)
+        for (uint256 r = 0; r < 2; r++) {
+            _contribute(pool, alice); _contribute(pool, bob);
+            _contribute(pool, carol); _contribute(pool, dave);
+        }
+        // R2: alice + bob pay; carol & dave (trailing slots 2 & 3) default
+        _contribute(pool, alice); _contribute(pool, bob);
+        vm.warp(block.timestamp + 7 days + 48 hours + 1);
+        pool.settle(); // ejects carol,dave; both trailing slots unpayable -> Cancelled
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled), "trailing defaults cancel");
+        assertEq(pool.cancelledRound(), 2, "stuck round recorded pre-skip");
+
+        // alice & bob recover their stuck R2 contributions — NOT stranded
+        uint256 aBefore = usdc.balanceOf(alice);
+        vm.prank(alice); pool.claimRefund();
+        assertEq(usdc.balanceOf(alice) - aBefore, CONTRIB, "survivor recovers stuck round contribution");
+        vm.prank(bob); pool.claimRefund();
+        assertEq(usdc.balanceOf(address(pool)), 0, "nothing stranded");
+
+        // the defaulters forfeit (they didn't pay the cancelled round)
+        vm.prank(carol);
+        vm.expectRevert(bytes("Nothing to claim"));
+        pool.claimRefund();
     }
 
     /// Full wipeout (every member misses the same round): everyone is ejected,
@@ -631,6 +701,25 @@ contract PotPoolTest is Test {
     // ------------------------------------------------------------------
     // TODO: audit-target edge cases (stubs — implement before mainnet)
     // ------------------------------------------------------------------
+
+    /// A fully-staked pool that just entered Pending can't be force-cancelled by
+    /// the forming clock (the griefing vector my Pending-cancel addition created);
+    /// it's only cancellable PENDING_CANCEL_WINDOW after the VRF request.
+    function test_PendingPool_CannotBeFrontRunCancelled() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, true, 0, false));
+        vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        vm.startPrank(bob);   usdc.approve(address(pool), CONTRIB); pool.join();  vm.stopPrank();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending));
+
+        vm.warp(block.timestamp + 1 hours);
+        vm.expectRevert(bytes("VRF still pending"));
+        pool.cancelIfExpired();
+
+        vm.warp(block.timestamp + pool.PENDING_CANCEL_WINDOW());
+        pool.cancelIfExpired();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled));
+    }
 
     // Previously-stubbed audit targets, now covered by real tests:
     //   - full wipeout            -> test_FullWipeout_DisbandRefundsAllStakes
@@ -696,8 +785,8 @@ contract PotPoolTest is Test {
         vm.prank(alice);
         PotPool pool = PotPool(f.createPool(CONTRIB, 7, 2, true, 0, false));
         rtoken.mint(bob, 1_000e6);
-        vm.startPrank(bob); rtoken.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
         vm.startPrank(alice); rtoken.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        vm.startPrank(bob); rtoken.approve(address(pool), CONTRIB); pool.join(); vm.stopPrank();
         vm.warp(block.timestamp + 7 days + 1);
         pool.cancelIfExpired();
 
@@ -762,17 +851,19 @@ contract PotPoolTest is Test {
     function _formPublicStaked(address[] memory who) internal returns (PotPool pool) {
         vm.prank(who[0]);
         pool = PotPool(factory.createPool(CONTRIB, 7, uint8(who.length), true, 0, false));
-        for (uint256 i = 1; i < who.length; i++) {
-            vm.startPrank(who[i]);
-            usdc.approve(address(pool), CONTRIB); // stake approval
-            pool.join();                          // pulls the stake atomically
-            vm.stopPrank();
-        }
+        // creator stakes FIRST (required before anyone else can join)
         vm.startPrank(who[0]);
         usdc.approve(address(pool), CONTRIB);
-        pool.stake();                             // creator stakes -> begins the pool (Pending)
+        pool.stake();
         vm.stopPrank();
-        _fulfill(pool);                           // VRF -> Active
+        // then the others join (auto-stake); the last one fills + starts the pool
+        for (uint256 i = 1; i < who.length; i++) {
+            vm.startPrank(who[i]);
+            usdc.approve(address(pool), CONTRIB);
+            pool.join();
+            vm.stopPrank();
+        }
+        _fulfill(pool); // VRF -> Active
     }
 
     /// Contribute for every current member each round until the pool completes

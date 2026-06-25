@@ -63,6 +63,10 @@ contract PotFactory {
         require(_scoreContract != address(0) && _treasury != address(0), "Zero address");
         require(_usdc != address(0), "Zero USDC");
         require(_vrfCoordinator != address(0), "Zero VRF coordinator");
+        // The VRF callback runs a shuffle + up to 10 lazy soulbound mints (~1.06M
+        // gas measured for a full pool). Floor the limit with margin so a low
+        // override can't brick a 10-member pool's start.
+        require(_vrfCallbackGasLimit >= 1_300_000, "Callback gas too low");
         scoreContract = PotScore(_scoreContract);
         protocolTreasury = _treasury;
         usdc = _usdc;
@@ -97,6 +101,11 @@ contract PotFactory {
         require(intervalDays == 7 || intervalDays == 30, "Weekly or monthly");
         require(!useFixedOrder || !isPublic, "Public pools must use random ordering");
         if (isPublic) {
+            // NOTE: `minScoreRequired` is the creator's own choice — a
+            // *discretionary trust filter* on who may join, NOT the protocol's
+            // Sybil defense. The real defense on public pools is the per-member
+            // stake-at-risk (slashed on default). A protocol-enforced score floor
+            // for public-pool creation is a v2/ladder decision (see DESIGN doc).
             require(
                 scoreContract.getScore(msg.sender) >= minScoreRequired,
                 "Score too low to create public pool"

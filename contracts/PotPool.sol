@@ -50,6 +50,7 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
     uint48 public constant GRACE_PERIOD = 48 hours;
     uint48 public constant FORMING_WINDOW = 7 days; // lobby lifetime before a stuck pool can be cancelled
     uint48 public constant RANDOMNESS_RETRY_WINDOW = 1 days; // after this, a stuck VRF request can be reissued
+    uint48 public constant PENDING_CANCEL_WINDOW = 2 days;   // a Pending pool can only be cancelled this long after its (latest) VRF request
 
     // `Pending` is appended (not inserted) so the existing numeric values of
     // Forming/Active/Complete/Cancelled stay stable for any consumer reading
@@ -78,8 +79,10 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
     mapping(address => bool) public staked; // member has locked their stake
     uint256 public stakedCount;             // # of current members who have staked
     uint256 public totalSlashed;            // forfeited stakes, split among survivors at completion
+    bool public slashDustTaken;             // first survivor to claim sweeps the division remainder (exact distribution)
 
     uint8 public currentRound;
+    uint8 public cancelledRound;            // the round whose contributions are stuck when a pool cancels mid-rotation
     uint256 public roundDeadline;
     mapping(uint8 => mapping(address => bool)) public contributed;
 
@@ -160,6 +163,9 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
         require(state == PoolState.Forming, "Not forming");
         require(members.length < maxMembers, "Pool full");
         if (isPublic) {
+            // The creator must stake first, before anyone else locks capital — so a
+            // creator who never stakes can't trap joiners' stakes for the window.
+            require(staked[creator], "Creator must stake first");
             require(scoreContract.getScore(msg.sender) >= minScore, "Score too low");
         } else {
             require(hasInvite[msg.sender] || msg.sender == creator, "No invite");
@@ -381,8 +387,19 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
     ///         the last resort after a genuinely dead subscription. CEI: the only
     ///         state change precedes the event; no external calls here.
     function cancelIfExpired() external {
-        require(state == PoolState.Forming || state == PoolState.Pending, "Not cancellable");
-        require(block.timestamp >= formingDeadline, "Not expired");
+        if (state == PoolState.Forming) {
+            require(block.timestamp >= formingDeadline, "Not expired");
+        } else if (state == PoolState.Pending) {
+            // A Pending pool legitimately started — don't let the construction-time
+            // forming clock kill it (a pool that filled near the deadline would
+            // otherwise be cancellable the instant VRF is requested, before the
+            // callback can land). It's only cancellable once VRF has been stuck for
+            // PENDING_CANCEL_WINDOW past the latest request, by which point
+            // retryRotation has had its chances and the subscription is truly dead.
+            require(block.timestamp >= randomnessRequestedAt + PENDING_CANCEL_WINDOW, "VRF still pending");
+        } else {
+            revert("Not cancellable");
+        }
         state = PoolState.Cancelled;
         emit PoolCancelled();
     }
@@ -417,12 +434,20 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
             require(isMember[msg.sender], "Not a surviving member");
             require(staked[msg.sender], "No stake to claim");
             amount = contributionAmount; // stake back
-            if (members.length > 0) amount += totalSlashed / members.length; // share of slashed
+            if (members.length > 0 && totalSlashed > 0) {
+                amount += totalSlashed / members.length; // equal share of slashed stakes
+                // The first survivor to claim also sweeps the division remainder,
+                // so the full slashed total is distributed (no dust stranded).
+                if (!slashDustTaken) {
+                    amount += totalSlashed % members.length;
+                    slashDustTaken = true;
+                }
+            }
         } else {
             // Disband: return the stake (no slashing) + any contribution stuck in
             // the cancelled round. Open to ejected members too (everMember).
             if (staked[msg.sender]) amount += contributionAmount;
-            if (contributed[currentRound][msg.sender]) amount += contributionAmount;
+            if (contributed[cancelledRound][msg.sender]) amount += contributionAmount;
             require(amount > 0, "Nothing to claim");
         }
         require(usdc.transfer(msg.sender, amount), "Stake refund failed");
@@ -508,6 +533,12 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
     /// @dev Release the pot to this round's recipient, skipping any recipient who
     ///      has been ejected, then advance the round (or complete the pool).
     function _payout() internal {
+        // The round whose contributions we are settling — captured BEFORE the skip
+        // loop advances `currentRound`. If we cancel below, this is the round the
+        // money was actually collected in; claimRefund must refund against THIS,
+        // not the advanced `currentRound` (which would strand honest contributions).
+        uint8 contribRound = currentRound;
+
         // Advance past ejected recipients so we never pay a wallet that left.
         address recipient = rotationOrder[currentRound];
         while (!isMember[recipient] && currentRound < rotationOrder.length - 1) {
@@ -515,10 +546,11 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
             recipient = rotationOrder[currentRound];
         }
 
-        // GUARD: if a full wipeout left no live members, there is no one to pay.
-        // Cancel the pool; net funds (if any) are recoverable in v0.2 reconcile.
-        // See ARCHITECTURE.md "Known gaps": disband/refund accounting.
+        // GUARD: no live recipient (full wipeout, or the trailing rotation slots
+        // are all ejected) → cancel. Record the stuck round so claimRefund returns
+        // this round's already-collected contributions instead of stranding them.
         if (members.length == 0 || !isMember[recipient]) {
+            cancelledRound = contribRound;
             state = PoolState.Cancelled;
             return;
         }

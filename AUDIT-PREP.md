@@ -2,8 +2,22 @@
 
 Turnkey scope/threat-model/invariants package for a third-party audit (Code4rena or
 equivalent). The audit is the hard gate before any fund-holding mainnet deploy. As
-of v1.1: `forge test` = 29 passing / 0 skipped; `npx hardhat compile` clean (evm
+of v1.1: `forge test` = 32 passing / 0 skipped; `npx hardhat compile` clean (evm
 target `cancun`).
+
+## Pre-audit red-team (2026-06-24)
+Three independent reviewers (fresh context, told to distrust the docs/tests)
+adversarially re-derived the code. They converged on one **Critical** (now fixed):
+`_payout`'s recipient-skip advanced `currentRound` past the round survivors
+contributed to, so a ≥2-trailing-default cancel stranded honest funds via
+`claimRefund` (fixed with `cancelledRound`). Also fixed: a self-introduced griefing
+vector (`cancelIfExpired` could kill a fresh `Pending` pool — now Pending has its own
+clock), a creator-stake grief (creator must now stake before public joins), slash
+division dust (first claimant sweeps it), and a VRF-callback-gas floor. Independently
+re-confirmed clean: reentrancy, VRF idempotency, ordering enforcement, `_ejectMissers`,
+no insolvency/double-claim. Deliberately deferred: lifetime net-position accounting
+(v2 — defaulter forfeiture is correct ROSCA economics) and the public score-gate
+(a creator filter, not the Sybil defense — the stake is).
 
 ## In scope
 - `contracts/PotPool.sol` — one circle's full lifecycle; holds USDC.
