@@ -55,10 +55,17 @@ This deletes the constrained-shuffle idea entirely; ordering becomes a flag + an
 - Residual: two fund-stranding edges (full wipeout, last-slot default) are **closed** as of the v1.1 hardening pass (disband reconciliation); lifetime net-position accounting across many partial rounds remains the only #5 residual.
 - **All of the above is audit-gated** — nothing merges to a fund-holding deploy without a Code4rena pass. Threat model + invariants for that audit are in `AUDIT-PREP.md`.
 
-## v2 roadmap (deliberately out of v1.1, not gaps)
+## Roadmap (deliberately out of v1.1, not gaps)
 v1.1's Sybil posture is **complete on its own**: friend/invite pools are immune by
 construction, and public pools are stake-gated with slashing-on-default. The following
-are intentional *next-version* choices, gated on real demand — not unfinished work:
+are intentional later choices, gated on real demand — not unfinished work:
+
+**v1.1.x fast-follow:**
+- **Savings mode** — a creator-choice, Sybil-immune, zero-credit pool type (no early
+  payout; withdraw your own at close). Builds on the audited core as a *separate*
+  contract. Full spec: [`DESIGN-savings-mode.md`](DESIGN-savings-mode.md).
+
+**v2:**
 - **Proof-of-personhood**, opt-in per public pool (World ID / BrightID / Gitcoin Passport)
   — the only robust defense for *truly open* stranger pools, accepting that it costs some
   trustlessness and adds friction. Build it when open stranger pools are real demand.
