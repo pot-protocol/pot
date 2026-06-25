@@ -721,6 +721,43 @@ contract PotPoolTest is Test {
         assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled));
     }
 
+    /// Regression (red-team 2026-06-24): the Pending-cancel must anchor on
+    /// `pendingSince` (immutable across retries), NOT `randomnessRequestedAt`
+    /// (which retryRotation resets). Anchoring on the resettable clock let anyone
+    /// spam permissionless retries — a cheaper interval than the cancel window —
+    /// to push the deadline out forever and freeze members' stakes (a griefing
+    /// DoS that also drains the factory's VRF subscription). This proves retry
+    /// spam can no longer block recovery of a genuinely-dead Pending pool.
+    function test_PendingPool_RetrySpamCannotBlockCancel() public {
+        vm.prank(alice);
+        PotPool pool = PotPool(factory.createPool(CONTRIB, 7, 2, true, 0, false));
+        vm.startPrank(alice); usdc.approve(address(pool), CONTRIB); pool.stake(); vm.stopPrank();
+        vm.startPrank(bob);   usdc.approve(address(pool), CONTRIB); pool.join();  vm.stopPrank();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Pending));
+
+        uint256 ps = pool.pendingSince();
+        uint256 retry = pool.RANDOMNESS_RETRY_WINDOW();
+
+        // bob (a non-creator) spams retries up to the cancel boundary, each one
+        // resetting the old rate-limit clock — proving it's permissionless.
+        vm.warp(ps + retry);
+        vm.prank(bob); pool.retryRotation();
+        vm.warp(ps + pool.PENDING_CANCEL_WINDOW());
+        vm.prank(bob); pool.retryRotation();
+
+        // randomnessRequestedAt is now fresh (== now): the OLD predicate
+        // (randomnessRequestedAt + window) would still revert here. The
+        // pendingSince anchor lets the dead pool be cancelled, freeing stakes.
+        assertEq(pool.randomnessRequestedAt(), block.timestamp, "retry reset the rate-limit clock");
+        pool.cancelIfExpired();
+        assertEq(uint8(pool.state()), uint8(PotPool.PoolState.Cancelled), "retries cannot block cancel");
+
+        // Stakes are recoverable, not frozen.
+        uint256 beforeBal = usdc.balanceOf(alice);
+        vm.prank(alice); pool.claimRefund();
+        assertEq(usdc.balanceOf(alice), beforeBal + CONTRIB, "stake refunded after grief-proof cancel");
+    }
+
     // Previously-stubbed audit targets, now covered by real tests:
     //   - full wipeout            -> test_FullWipeout_DisbandRefundsAllStakes
     //   - stake lock/release/slash -> test_PublicPool_Stake* + Slashed*

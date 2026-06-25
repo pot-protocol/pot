@@ -2,22 +2,38 @@
 
 Turnkey scope/threat-model/invariants package for a third-party audit (Code4rena or
 equivalent). The audit is the hard gate before any fund-holding mainnet deploy. As
-of v1.1: `forge test` = 32 passing / 0 skipped; `npx hardhat compile` clean (evm
+of v1.1: `forge test` = 33 passing / 0 skipped; `npx hardhat compile` clean (evm
 target `cancun`).
 
 ## Pre-audit red-team (2026-06-24)
-Three independent reviewers (fresh context, told to distrust the docs/tests)
-adversarially re-derived the code. They converged on one **Critical** (now fixed):
-`_payout`'s recipient-skip advanced `currentRound` past the round survivors
-contributed to, so a ≥2-trailing-default cancel stranded honest funds via
-`claimRefund` (fixed with `cancelledRound`). Also fixed: a self-introduced griefing
-vector (`cancelIfExpired` could kill a fresh `Pending` pool — now Pending has its own
-clock), a creator-stake grief (creator must now stake before public joins), slash
-division dust (first claimant sweeps it), and a VRF-callback-gas floor. Independently
-re-confirmed clean: reentrancy, VRF idempotency, ordering enforcement, `_ejectMissers`,
-no insolvency/double-claim. Deliberately deferred: lifetime net-position accounting
-(v2 — defaulter forfeiture is correct ROSCA economics) and the public score-gate
-(a creator filter, not the Sybil defense — the stake is).
+Independent reviewers (fresh context, told to distrust the docs/tests) adversarially
+re-derived the code in two waves.
+
+**Wave 1** converged on one **Critical** (now fixed): `_payout`'s recipient-skip
+advanced `currentRound` past the round survivors contributed to, so a ≥2-trailing-
+default cancel stranded honest funds via `claimRefund` (fixed with `cancelledRound`).
+Also fixed: a self-introduced griefing vector (`cancelIfExpired` could kill a fresh
+`Pending` pool — now Pending has its own clock), a creator-stake grief (creator must
+now stake before public joins), slash division dust (first claimant sweeps it), and a
+VRF-callback-gas floor.
+
+**Wave 2** re-verified those fixes and caught a **Medium regression in the Pending-clock
+fix itself** (now fixed): the new Pending-cancel had been keyed off
+`randomnessRequestedAt`, which `retryRotation` resets — so anyone could spam
+permissionless retries (1-day interval, shorter than the 2-day cancel window) to push
+the cancel deadline out indefinitely, freezing members' stakes and draining the
+factory's VRF subscription. Fixed by anchoring the cancel on `pendingSince` (set once
+on first Pending entry, never moved by retries); regression-tested by
+`test_PendingPool_RetrySpamCannotBlockCancel`. The other four Wave-1 fixes were
+independently re-confirmed fully closed with no regression, and the VRF gas floor
+(1.3M) was independently re-measured against the 10-member worst case (~1.06M).
+
+**Believed clean — flagged for the auditor to re-verify, not asserted as settled:**
+reentrancy, VRF idempotency, ordering enforcement, `_ejectMissers`, solvency, and the
+no-double-claim property. These are exactly the highest-value checks; the package asks
+the audit to break them, not to take our word. Deliberately deferred: lifetime
+net-position accounting (v2 — defaulter forfeiture is correct ROSCA economics) and the
+public score-gate (a creator filter, not the Sybil defense — the stake is).
 
 ## In scope
 - `contracts/PotPool.sol` — one circle's full lifecycle; holds USDC.
@@ -29,6 +45,19 @@ no insolvency/double-claim. Deliberately deferred: lifetime net-position account
   would break pot/stake accounting — pools should only ever be deployed with canonical USDC).
 - Chainlink VRF coordinator (assumed honest; only it can call `rawFulfillRandomWords`).
 - OpenZeppelin + Chainlink library code.
+
+## Trusted deployment invariants (assumed, not code-enforced — the auditor should know these)
+- **PotScore ownership is transferred to the factory at deploy.** The factory owns
+  PotScore so `createPool` can authorize each new pool. If this transfer is skipped,
+  `createPool` reverts (fail-closed, no fund risk) — but it is a deployment step the
+  package assumes, not an on-chain guarantee.
+- **An authorized pool only ever mutates its *own* members' scores.** PotScore's
+  hooks (`onMiss`, `onContribution`, `onPoolStarted`, `onPoolComplete`) are
+  `onlyPool`-gated but take an *arbitrary* wallet/roster — PotScore trusts the calling
+  pool to pass only its own members. This is **not exploitable today** (the sole
+  authorized bytecode is `PotPool`, which only ever fires hooks for its own roster),
+  but it is an undeclared invariant: any *future* authorized pool variant must uphold
+  it, and PotScore does not enforce membership itself.
 
 ## Roles & trust
 - **Factory deployer/owner** — owns the VRF subscription; must fund it; owns PotScore
@@ -76,11 +105,11 @@ no insolvency/double-claim. Deliberately deferred: lifetime net-position account
 
 ## Build / test
 ```
-forge test -vvv          # 29 passing, 0 skipped (foundry)
+forge test -vvv          # 33 passing, 0 skipped (foundry)
 npx hardhat compile      # primary toolchain, evm target cancun
 ```
 Coverage spans: forming/invite/score-gating, VRF two-phase start + retry + stale-callback
 no-op + spoof rejection, ordering modes (random/fixed, public-forces-random), the full
 contribute→settle→payout lifecycle, ejection + slashing + survivor split, disband
-reconciliation (full wipeout + last-slot default), stake gating + refunds, reentrancy, and
-the soulbound property.
+reconciliation (full wipeout + last-slot default), stake gating + refunds, the Pending-cancel
+front-run guard + its retry-spam-DoS regression, reentrancy, and the soulbound property.

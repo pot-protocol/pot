@@ -60,7 +60,8 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
     PoolState public state;
 
     uint256 public vrfRequestId;          // current/last VRF request awaiting fulfillment
-    uint256 public randomnessRequestedAt; // when the pending request went out (retry clock)
+    uint256 public randomnessRequestedAt; // when the LATEST request went out (retry rate-limit clock; reset by retryRotation)
+    uint256 public pendingSince;          // when the pool FIRST entered Pending (immutable across retries; the cancel clock)
 
     address[] public members;        // live roster (ejections remove entries)
     address[] public rotationOrder;  // payout order, locked at start, never mutated
@@ -293,6 +294,10 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
     function _requestRotation() internal {
         state = PoolState.Pending;
         randomnessRequestedAt = block.timestamp;
+        // pendingSince anchors the cancel clock to the FIRST Pending entry and is
+        // never moved by retryRotation, so retry spam cannot push the cancel
+        // deadline out (which would freeze stakes forever — a griefing DoS).
+        pendingSince = block.timestamp;
         vrfRequestId = _sendRandomnessRequest();
         emit RotationRequested(vrfRequestId);
     }
@@ -393,10 +398,14 @@ contract PotPool is VRFConsumerBaseV2Plus, ReentrancyGuard {
             // A Pending pool legitimately started — don't let the construction-time
             // forming clock kill it (a pool that filled near the deadline would
             // otherwise be cancellable the instant VRF is requested, before the
-            // callback can land). It's only cancellable once VRF has been stuck for
-            // PENDING_CANCEL_WINDOW past the latest request, by which point
-            // retryRotation has had its chances and the subscription is truly dead.
-            require(block.timestamp >= randomnessRequestedAt + PENDING_CANCEL_WINDOW, "VRF still pending");
+            // callback can land). It's cancellable once VRF has been stuck for
+            // PENDING_CANCEL_WINDOW past the pool's FIRST Pending entry. We anchor on
+            // `pendingSince` (immutable across retries), NOT `randomnessRequestedAt`
+            // (which retryRotation resets): keying off the resettable clock would let
+            // anyone spam retries (cheaper interval than the cancel window) to push
+            // this deadline out forever and freeze members' stakes — a griefing DoS.
+            // `pendingSince` still grants a near-deadline fill a full 2-day window.
+            require(block.timestamp >= pendingSince + PENDING_CANCEL_WINDOW, "VRF still pending");
         } else {
             revert("Not cancellable");
         }

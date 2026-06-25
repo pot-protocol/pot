@@ -273,13 +273,16 @@ arbitrary contract — only by a pool the factory deployed.
 2. Member calls `pool.contribute()` → USDC moves member → pool; score updated.
 3. When the round is fully funded (auto) or grace expires (`settle`), `_payout`
    runs:
-   - `fee = pot * 1% ` → treasury
-   - `payout = pot - fee` → recipient
+   - `fee = pot * PROTOCOL_FEE_BPS / 10_000` — currently **0** (`PROTOCOL_FEE_BPS == 0`),
+     so the treasury-transfer branch (`if (fee > 0)`) is dead and nothing is skimmed.
+   - `payout = pot - fee` → recipient, i.e. the recipient receives the **full pot**.
 4. Repeat for each round; on the final round the pool flips to `Complete` and
    every surviving member is credited a completed pool.
 
-The protocol's only revenue is the 1% skim at step 3 — taken from the flow, not
-lent against anyone's balance.
+The protocol takes **0% fee** today: a circle is a pure pass-through of contributions
+to the rotating recipient, never lent against anyone's balance. The fee plumbing exists
+(a future governance choice could set `PROTOCOL_FEE_BPS > 0`) but is inert at launch —
+see the "0% protocol fee" invariant in AUDIT-PREP.md.
 
 ---
 
